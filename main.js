@@ -25,6 +25,20 @@ wss.on("connection", (ws) => {
 
     switch (msg.type) {
       case "register_esp":
+        // Check if the device ID is already registered
+        if (clients.has(msg.id)) {
+          const oldClient = clients.get(msg.id);
+          // Close the old connection if it's still open
+          if (oldClient.readyState === WebSocket.OPEN) {
+            oldClient.send(JSON.stringify({
+              type: "disconnect",
+              reason: "new connection replaced old one"
+            }));
+            oldClient.close();
+          }
+          console.log(`Replaced existing ESP: ${msg.id}`);
+        }
+        // Register the new connection
         clients.set(msg.id, ws);
         passwords.set(msg.id, msg.password);
         console.log(`Registered ESP: ${msg.id}`);
@@ -97,6 +111,14 @@ wss.on("connection", (ws) => {
             type: "command",
             commandId: commandId,
             message: msg.message
+          }));
+
+          // Send confirmation to the client that the command was sent
+          ws.send(JSON.stringify({
+            type: "command_sent",
+            commandId: commandId,
+            targetId: msg.targetId,
+            message: "Command successfully sent to ESP"
           }));
         }
         break;
