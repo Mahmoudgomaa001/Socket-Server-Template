@@ -25,6 +25,18 @@ wss.on("connection", (ws) => {
 
     switch (msg.type) {
       case "register_esp":
+        // Check if the device ID is already registered
+        if (clients.has(msg.id)) {
+          const oldClient = clients.get(msg.id);
+          if (oldClient.readyState === WebSocket.OPEN) {
+            oldClient.send(JSON.stringify({
+              type: "disconnect",
+              reason: "new connection replaced old one"
+            }));
+            oldClient.close();
+          }
+          console.log(`Replaced existing ESP: ${msg.id}`);
+        }
         clients.set(msg.id, ws);
         passwords.set(msg.id, msg.password);
         console.log(`Registered ESP: ${msg.id}`);
@@ -52,11 +64,13 @@ wss.on("connection", (ws) => {
         const correctPassword = passwords.get(msg.targetId);
 
         if (!targetClient) {
+          console.log(`Command failed: ESP ${msg.targetId} not online`);
           ws.send(JSON.stringify({ 
             type: "error", 
-            message: "ESP not online" 
+            message: `ESP ${msg.targetId} not online` 
           }));
         } else if (correctPassword !== msg.password) {
+          console.log(`Command failed: Wrong password for ESP ${msg.targetId}`);
           ws.send(JSON.stringify({ 
             type: "error", 
             message: "Wrong password" 
@@ -93,10 +107,20 @@ wss.on("connection", (ws) => {
           awaitingResponses.set(commandId, new Set([ws]));
 
           // Send the command to the target ESP
+          console.log(`Sending command to ESP ${msg.targetId}:`, { commandId, message: msg.message });
           targetClient.send(JSON.stringify({
             type: "command",
             commandId: commandId,
             message: msg.message
+          }));
+
+          // Send confirmation to the client that the command was sent
+          console.log(`Command confirmation sent to client for ESP ${msg.targetId}, commandId: ${commandId}`);
+          ws.send(JSON.stringify({
+            type: "command_sent",
+            commandId: commandId,
+            targetId: msg.targetId,
+            message: `Command successfully sent to ESP ${msg.targetId}`
           }));
         }
         break;
@@ -127,6 +151,14 @@ wss.on("connection", (ws) => {
           // Optional: remove if response is final
           // awaitingResponses.delete(msg.commandId);
         }
+        break;
+
+      case "ping":
+        console.log(`Received ping from client`);
+        ws.send(JSON.stringify({
+          type: "pong",
+          message: "Pong response"
+        }));
         break;
 
       default:
