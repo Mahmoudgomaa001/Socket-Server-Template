@@ -163,6 +163,7 @@ wss.on("connection", (ws) => {
 
       default:
         console.log("Unknown message type:", msg.type);
+        console.log("Message:", msg);
         break;
     }
   });
