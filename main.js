@@ -12,16 +12,23 @@ console.log("WebSocket server started on port 8080");
 wss.on("connection", (ws) => {
   console.log("New client connected");
 
-  ws.on("message", (data) => {
-    let msg;
-    try {
-      msg = JSON.parse(data);
-    } catch (e) {
-      console.log("Invalid JSON:", data);
-      console.log("Message:", data);
-      return;
-    }
+ws.on("message", (data, isBinary) => {
+  if (isBinary) {
+    console.warn("Received binary data. Ignoring.");
+    return;
+  }
 
+  let jsonStr;
+  try {
+    jsonStr = data.toString('utf8');
+    if (!jsonStr.trim().startsWith('{')) throw new Error("Not JSON");
+    msg = JSON.parse(jsonStr);
+  } catch (e) {
+    console.error("❌ Invalid JSON or UTF-8 from client:");
+    console.error(data);
+    console.error("Error:", e.message);
+    return;
+  }
     console.log("Received:", msg);
 
     switch (msg.type) {
