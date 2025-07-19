@@ -10,19 +10,26 @@ const lastUsedEspByClient = new Map(); // WebSocket => ESP ID
 console.log("WebSocket server started on port 8080");
 
 wss.on("connection", (ws) => {
-  console.log("New client connected");
+  console.log("New client connected:", {
+    remoteAddress: ws._socket.remoteAddress,
+    remotePort: ws._socket.remotePort
+  });
 
-  // Handle WebSocket errors
+  // Handle WebSocket errors (catches invalid UTF-8 frames)
   ws.on("error", (error) => {
     console.error("WebSocket error from client:", {
       remoteAddress: ws._socket.remoteAddress,
       remotePort: ws._socket.remotePort,
-      error: error.message,
+      error: error.message
     });
     ws.close(1007, "Invalid UTF-8 sequence received");
   });
 
   ws.on("message", (data, isBinary) => {
+    // Log raw data for debugging
+    console.log("Raw data (hex):", data.toString("hex"));
+    console.log("Is binary:", isBinary);
+
     if (isBinary) {
       console.warn("Received binary data. Ignoring.");
       return;
@@ -30,23 +37,25 @@ wss.on("connection", (ws) => {
 
     let msg;
     try {
-      // Validate UTF-8 encoding
-      if (!Buffer.isUtf8(data)) {
-        console.error("Received invalid UTF-8 data. Ignoring.");
-        ws.send(JSON.stringify({ type: "error", message: "Invalid UTF-8 data" }));
-        return;
+      // Attempt to decode as UTF-8
+      const jsonStr = data.toString("utf8");
+      console.log("Decoded string:", jsonStr); // Log decoded string for debugging
+
+      // Check if the string is likely JSON
+      if (!jsonStr.trim().startsWith("{")) {
+        throw new Error("Not JSON");
       }
 
-      const jsonStr = data.toString("utf8");
-      if (!jsonStr.trim().startsWith("{")) throw new Error("Not JSON");
+      // Parse JSON
       msg = JSON.parse(jsonStr);
     } catch (e) {
       console.error("❌ Invalid JSON or UTF-8 from client:");
-      console.error(data);
+      console.error("Data (hex):", data.toString("hex"));
       console.error("Error:", e.message);
       ws.send(JSON.stringify({ type: "error", message: "Invalid message format" }));
       return;
     }
+
     console.log("Received:", msg);
 
     switch (msg.type) {
@@ -57,7 +66,7 @@ wss.on("connection", (ws) => {
             oldClient.send(
               JSON.stringify({
                 type: "disconnect",
-                reason: "new connection replaced old one",
+                reason: "new connection replaced old one"
               })
             );
             oldClient.close();
@@ -76,7 +85,7 @@ wss.on("connection", (ws) => {
           return {
             id: device.id,
             online: !!client,
-            auth: storedPassword === device.password,
+            auth: storedPassword === device.password
           };
         });
 
@@ -92,7 +101,7 @@ wss.on("connection", (ws) => {
           ws.send(
             JSON.stringify({
               type: "error",
-              message: `ESP ${msg.targetId} not online`,
+              message: `ESP ${msg.targetId} not online`
             })
           );
         } else if (correctPassword !== msg.password) {
@@ -108,7 +117,7 @@ wss.on("connection", (ws) => {
               previousEsp.send(
                 JSON.stringify({
                   type: "disconnect",
-                  reason: "client switched ESP",
+                  reason: "client switched ESP"
                 })
               );
             }
@@ -129,13 +138,13 @@ wss.on("connection", (ws) => {
 
           console.log(`Sending command to ESP ${msg.targetId}:`, {
             commandId,
-            message: msg.message,
+            message: msg.message
           });
           targetClient.send(
             JSON.stringify({
               type: "command",
               commandId: commandId,
-              message: msg.message,
+              message: msg.message
             })
           );
 
@@ -147,7 +156,7 @@ wss.on("connection", (ws) => {
               type: "command_sent",
               commandId: commandId,
               targetId: msg.targetId,
-              message: `Command successfully sent to ESP ${msg.targetId}`,
+              message: `Command successfully sent to ESP ${msg.targetId}`
             })
           );
         }
@@ -164,7 +173,7 @@ wss.on("connection", (ws) => {
           const responseToSend = {
             type: "response",
             commandId: msg.commandId,
-            response: msg.response,
+            response: msg.response
           };
 
           const responseString = JSON.stringify(responseToSend);
@@ -216,7 +225,7 @@ wss.on("connection", (ws) => {
         lastEsp.send(
           JSON.stringify({
             type: "disconnect",
-            reason: "client disconnected",
+            reason: "client disconnected"
           })
         );
       }
