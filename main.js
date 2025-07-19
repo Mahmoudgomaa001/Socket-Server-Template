@@ -2,9 +2,9 @@ const WebSocket = require("ws");
 
 const wss = new WebSocket.Server({ port: 8080 });
 
-const clients = new Map();            // id => WebSocket
-const passwords = new Map();          // id => password
-const awaitingResponses = new Map();  // commandId => Set of WebSockets
+const clients = new Map(); // id => WebSocket
+const passwords = new Map(); // id => password
+const awaitingResponses = new Map(); // commandId => Set of WebSockets
 const lastUsedEspByClient = new Map(); // WebSocket => ESP ID
 
 console.log("WebSocket server started on port 8080");
@@ -12,35 +12,54 @@ console.log("WebSocket server started on port 8080");
 wss.on("connection", (ws) => {
   console.log("New client connected");
 
-ws.on("message", (data, isBinary) => {
-  if (isBinary) {
-    console.warn("Received binary data. Ignoring.");
-    return;
-  }
+  // Handle WebSocket errors
+  ws.on("error", (error) => {
+    console.error("WebSocket error from client:", {
+      remoteAddress: ws._socket.remoteAddress,
+      remotePort: ws._socket.remotePort,
+      error: error.message,
+    });
+    ws.close(1007, "Invalid UTF-8 sequence received");
+  });
 
-  let jsonStr;
-  try {
-    jsonStr = data.toString('utf8');
-    if (!jsonStr.trim().startsWith('{')) throw new Error("Not JSON");
-    msg = JSON.parse(jsonStr);
-  } catch (e) {
-    console.error("❌ Invalid JSON or UTF-8 from client:");
-    console.error(data);
-    console.error("Error:", e.message);
-    return;
-  }
+  ws.on("message", (data, isBinary) => {
+    if (isBinary) {
+      console.warn("Received binary data. Ignoring.");
+      return;
+    }
+
+    let msg;
+    try {
+      // Validate UTF-8 encoding
+      if (!Buffer.isUtf8(data)) {
+        console.error("Received invalid UTF-8 data. Ignoring.");
+        ws.send(JSON.stringify({ type: "error", message: "Invalid UTF-8 data" }));
+        return;
+      }
+
+      const jsonStr = data.toString("utf8");
+      if (!jsonStr.trim().startsWith("{")) throw new Error("Not JSON");
+      msg = JSON.parse(jsonStr);
+    } catch (e) {
+      console.error("❌ Invalid JSON or UTF-8 from client:");
+      console.error(data);
+      console.error("Error:", e.message);
+      ws.send(JSON.stringify({ type: "error", message: "Invalid message format" }));
+      return;
+    }
     console.log("Received:", msg);
 
     switch (msg.type) {
       case "register_esp":
-        // Check if the device ID is already registered
         if (clients.has(msg.id)) {
           const oldClient = clients.get(msg.id);
           if (oldClient.readyState === WebSocket.OPEN) {
-            oldClient.send(JSON.stringify({
-              type: "disconnect",
-              reason: "new connection replaced old one"
-            }));
+            oldClient.send(
+              JSON.stringify({
+                type: "disconnect",
+                reason: "new connection replaced old one",
+              })
+            );
             oldClient.close();
           }
           console.log(`Replaced existing ESP: ${msg.id}`);
@@ -57,14 +76,11 @@ ws.on("message", (data, isBinary) => {
           return {
             id: device.id,
             online: !!client,
-            auth: storedPassword === device.password
+            auth: storedPassword === device.password,
           };
         });
 
-        ws.send(JSON.stringify({ 
-          type: "check_results", 
-          results: results 
-        }));
+        ws.send(JSON.stringify({ type: "check_results", results: results }));
         break;
 
       case "command":
@@ -73,35 +89,33 @@ ws.on("message", (data, isBinary) => {
 
         if (!targetClient) {
           console.log(`Command failed: ESP ${msg.targetId} not online`);
-          ws.send(JSON.stringify({ 
-            type: "error", 
-            message: `ESP ${msg.targetId} not online` 
-          }));
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              message: `ESP ${msg.targetId} not online`,
+            })
+          );
         } else if (correctPassword !== msg.password) {
           console.log(`Command failed: Wrong password for ESP ${msg.targetId}`);
-          ws.send(JSON.stringify({ 
-            type: "error", 
-            message: "Wrong password" 
-          }));
+          ws.send(JSON.stringify({ type: "error", message: "Wrong password" }));
         } else {
           const commandId = msg.commandId || Math.random().toString(36).substr(2, 6);
 
-          // Send 'disconnect' to previous ESP if different
           const lastEspId = lastUsedEspByClient.get(ws);
           if (lastEspId && lastEspId !== msg.targetId) {
             const previousEsp = clients.get(lastEspId);
             if (previousEsp && previousEsp.readyState === WebSocket.OPEN) {
-              previousEsp.send(JSON.stringify({
-                type: "disconnect",
-                reason: "client switched ESP"
-              }));
+              previousEsp.send(
+                JSON.stringify({
+                  type: "disconnect",
+                  reason: "client switched ESP",
+                })
+              );
             }
           }
 
-          // Track this ESP as the last used
           lastUsedEspByClient.set(ws, msg.targetId);
 
-          // Remove this client from any previous commandId entries
           for (const [oldCommandId, clientSet] of awaitingResponses.entries()) {
             if (clientSet.has(ws)) {
               clientSet.delete(ws);
@@ -111,25 +125,31 @@ ws.on("message", (data, isBinary) => {
             }
           }
 
-          // Set this client as waiting for the response to this command
           awaitingResponses.set(commandId, new Set([ws]));
 
-          // Send the command to the target ESP
-          console.log(`Sending command to ESP ${msg.targetId}:`, { commandId, message: msg.message });
-          targetClient.send(JSON.stringify({
-            type: "command",
-            commandId: commandId,
-            message: msg.message
-          }));
+          console.log(`Sending command to ESP ${msg.targetId}:`, {
+            commandId,
+            message: msg.message,
+          });
+          targetClient.send(
+            JSON.stringify({
+              type: "command",
+              commandId: commandId,
+              message: msg.message,
+            })
+          );
 
-          // Send confirmation to the client that the command was sent
-          console.log(`Command confirmation sent to client for ESP ${msg.targetId}, commandId: ${commandId}`);
-          ws.send(JSON.stringify({
-            type: "command_sent",
-            commandId: commandId,
-            targetId: msg.targetId,
-            message: `Command successfully sent to ESP ${msg.targetId}`
-          }));
+          console.log(
+            `Command confirmation sent to client for ESP ${msg.targetId}, commandId: ${commandId}`
+          );
+          ws.send(
+            JSON.stringify({
+              type: "command_sent",
+              commandId: commandId,
+              targetId: msg.targetId,
+              message: `Command successfully sent to ESP ${msg.targetId}`,
+            })
+          );
         }
         break;
 
@@ -144,29 +164,23 @@ ws.on("message", (data, isBinary) => {
           const responseToSend = {
             type: "response",
             commandId: msg.commandId,
-            response: msg.response
+            response: msg.response,
           };
 
           const responseString = JSON.stringify(responseToSend);
-          console.log('[RESPONSE] Sending:', responseString);
+          console.log("[RESPONSE] Sending:", responseString);
 
-          responseClients.forEach(client => {
+          responseClients.forEach((client) => {
             if (client.readyState === WebSocket.OPEN) {
               client.send(responseString);
             }
           });
-
-          // Optional: remove if response is final
-          // awaitingResponses.delete(msg.commandId);
         }
         break;
 
       case "ping":
         console.log(`Received ping from client`);
-        ws.send(JSON.stringify({
-          type: "pong",
-          message: "Pong response"
-        }));
+        ws.send(JSON.stringify({ type: "pong", message: "Pong response" }));
         break;
 
       default:
@@ -177,7 +191,6 @@ ws.on("message", (data, isBinary) => {
   });
 
   ws.on("close", () => {
-    // Clean up ESP registrations
     for (const [id, client] of clients.entries()) {
       if (client === ws) {
         clients.delete(id);
@@ -187,7 +200,6 @@ ws.on("message", (data, isBinary) => {
       }
     }
 
-    // Clean up response subscriptions
     for (const [commandId, clientSet] of awaitingResponses.entries()) {
       if (clientSet.has(ws)) {
         clientSet.delete(ws);
@@ -197,15 +209,16 @@ ws.on("message", (data, isBinary) => {
       }
     }
 
-    // Notify last ESP that this client disconnected
     const lastEspId = lastUsedEspByClient.get(ws);
     if (lastEspId) {
       const lastEsp = clients.get(lastEspId);
       if (lastEsp && lastEsp.readyState === WebSocket.OPEN) {
-        lastEsp.send(JSON.stringify({
-          type: "disconnect",
-          reason: "client disconnected"
-        }));
+        lastEsp.send(
+          JSON.stringify({
+            type: "disconnect",
+            reason: "client disconnected",
+          })
+        );
       }
       lastUsedEspByClient.delete(ws);
     }
