@@ -26,37 +26,26 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("message", (data, isBinary) => {
-    // Log raw data for debugging
-    console.log("Raw data (hex):", data.toString("hex"));
-    console.log("Is binary:", isBinary);
+  console.log("\n📥 New message received");
 
-    if (isBinary) {
-      console.warn("Received binary data. Ignoring.");
-      return;
-    }
+  if (isBinary) {
+    console.warn("🧾 Binary Data Received (hex):", data.toString("hex"));
+    return;
+  }
 
-    let msg;
-    try {
-      // Attempt to decode as UTF-8
-      const jsonStr = data.toString("utf8");
-      console.log("Decoded string:", jsonStr); // Log decoded string for debugging
+  const utf8String = data.toString("utf8");
+  console.log("📝 UTF-8 Decoded String:", utf8String);
 
-      // Check if the string is likely JSON
-      if (!jsonStr.trim().startsWith("{")) {
-        throw new Error("Not JSON");
-      }
+  try {
+    const parsed = JSON.parse(utf8String);
+    console.log("✅ Parsed JSON Message:", parsed);
+  } catch (err) {
+    console.warn("⚠️ Not valid JSON. Treating as raw text.");
+    console.log("📄 Raw message:", utf8String);
+  }
 
-      // Parse JSON
-      msg = JSON.parse(jsonStr);
-    } catch (e) {
-      console.error("❌ Invalid JSON or UTF-8 from client:");
-      console.error("Data (hex):", data.toString("hex"));
-      console.error("Error:", e.message);
-      ws.send(JSON.stringify({ type: "error", message: "Invalid message format" }));
-      return;
-    }
 
-    console.log("Received:", msg);
+    
 
     switch (msg.type) {
       case "register_esp":
