@@ -15,7 +15,6 @@ wss.on("connection", (ws) => {
     remotePort: ws._socket.remotePort
   });
 
-  // Handle WebSocket errors (catches invalid UTF-8 frames)
   ws.on("error", (error) => {
     console.error("WebSocket error from client:", {
       remoteAddress: ws._socket.remoteAddress,
@@ -26,26 +25,26 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("message", (data, isBinary) => {
-  console.log("\n📥 New message received");
+    console.log("\n📥 New message received");
 
-  if (isBinary) {
-    console.warn("🧾 Binary Data Received (hex):", data.toString("hex"));
-    return;
-  }
+    if (isBinary) {
+      console.warn("🧾 Binary Data Received (hex):", data.toString("hex"));
+      return;
+    }
 
-  const utf8String = data.toString("utf8");
-  console.log("📝 UTF-8 Decoded String:", utf8String);
+    const utf8String = data.toString("utf8");
+    console.log("📝 UTF-8 Decoded String:", utf8String);
 
-  try {
-    const parsed = JSON.parse(utf8String);
-    console.log("✅ Parsed JSON Message:", parsed);
-  } catch (err) {
-    console.warn("⚠️ Not valid JSON. Treating as raw text.");
-    console.log("📄 Raw message:", utf8String);
-  }
+    let msg = null;
 
-
-    
+    try {
+      msg = JSON.parse(utf8String);
+      console.log("✅ Parsed JSON Message:", msg);
+    } catch (err) {
+      console.warn("⚠️ Not valid JSON. Treating as raw text.");
+      console.log("📄 Raw message:", utf8String);
+      return; // Exit early, don't try to access msg
+    }
 
     switch (msg.type) {
       case "register_esp":
@@ -78,7 +77,7 @@ wss.on("connection", (ws) => {
           };
         });
 
-        ws.send(JSON.stringify({ type: "check_results", results: results }));
+        ws.send(JSON.stringify({ type: "check_results", results }));
         break;
 
       case "command":
@@ -86,7 +85,6 @@ wss.on("connection", (ws) => {
         const correctPassword = passwords.get(msg.targetId);
 
         if (!targetClient) {
-          console.log(`Command failed: ESP ${msg.targetId} not online`);
           ws.send(
             JSON.stringify({
               type: "error",
@@ -94,7 +92,6 @@ wss.on("connection", (ws) => {
             })
           );
         } else if (correctPassword !== msg.password) {
-          console.log(`Command failed: Wrong password for ESP ${msg.targetId}`);
           ws.send(JSON.stringify({ type: "error", message: "Wrong password" }));
         } else {
           const commandId = msg.commandId || Math.random().toString(36).substr(2, 6);
@@ -125,25 +122,18 @@ wss.on("connection", (ws) => {
 
           awaitingResponses.set(commandId, new Set([ws]));
 
-          console.log(`Sending command to ESP ${msg.targetId}:`, {
-            commandId,
-            message: msg.message
-          });
           targetClient.send(
             JSON.stringify({
               type: "command",
-              commandId: commandId,
+              commandId,
               message: msg.message
             })
           );
 
-          console.log(
-            `Command confirmation sent to client for ESP ${msg.targetId}, commandId: ${commandId}`
-          );
           ws.send(
             JSON.stringify({
               type: "command_sent",
-              commandId: commandId,
+              commandId,
               targetId: msg.targetId,
               message: `Command successfully sent to ESP ${msg.targetId}`
             })
@@ -152,13 +142,9 @@ wss.on("connection", (ws) => {
         break;
 
       case "response":
-        console.log(`Received response for command: ${msg.commandId}`);
         const responseClients = awaitingResponses.get(msg.commandId);
 
         if (responseClients && responseClients.size > 0) {
-          console.log(`[RESPONSE] CommandID: ${msg.commandId}`);
-          console.log(`[RESPONSE] Raw content:`, msg.response);
-
           const responseToSend = {
             type: "response",
             commandId: msg.commandId,
@@ -166,7 +152,6 @@ wss.on("connection", (ws) => {
           };
 
           const responseString = JSON.stringify(responseToSend);
-          console.log("[RESPONSE] Sending:", responseString);
 
           responseClients.forEach((client) => {
             if (client.readyState === WebSocket.OPEN) {
@@ -177,7 +162,6 @@ wss.on("connection", (ws) => {
         break;
 
       case "ping":
-        console.log(`Received ping from client`);
         ws.send(JSON.stringify({ type: "pong", message: "Pong response" }));
         break;
 
