@@ -18,6 +18,7 @@ wss.on("connection", (ws) => {
       msg = JSON.parse(data);
     } catch (e) {
       console.log("Invalid JSON:", data);
+      console.log("Message:", data);
       return;
     }
 
