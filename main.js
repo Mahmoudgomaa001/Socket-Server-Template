@@ -2,48 +2,30 @@ const WebSocket = require("ws");
 
 const wss = new WebSocket.Server({ port: 8080 });
 
-const clients = new Map();            // id => WebSocket
-const passwords = new Map();          // id => password
-const awaitingResponses = new Map();  // commandId => Set of WebSockets
+const clients = new Map();             // id => WebSocket
+const passwords = new Map();           // id => password
+const awaitingResponses = new Map();   // commandId => Set of WebSockets
 const lastUsedEspByClient = new Map(); // WebSocket => ESP ID
 
 console.log("✅ WebSocket server started on port 8080");
 
 wss.on("connection", (ws) => {
-  console.log("📡 New client connected");
+  console.log("🔌 New client connected");
 
   ws.on("message", (data) => {
     let msg;
-    let rawString = data.toString("utf8");
-
     try {
-      msg = JSON.parse(rawString);
+      msg = JSON.parse(data);
     } catch (e) {
-      // Non-JSON: check if it's from an ESP and forward to client
-      for (const [espId, espSocket] of clients.entries()) {
-        if (espSocket === ws) {
-          // Find last client for this ESP
-          for (const [commandId, clientSet] of awaitingResponses.entries()) {
-            for (const client of clientSet) {
-              if (client.readyState === WebSocket.OPEN) {
-                client.send(rawString); // Forward raw as-is
-              }
-            }
-          }
-          return;
-        }
-      }
-      console.log("⚠️ Invalid JSON and not from registered ESP:", rawString);
+      console.log("❌ Invalid JSON:", data);
       return;
     }
-
-    console.log("📥 Received:", msg);
 
     switch (msg.type) {
       case "register_esp":
         clients.set(msg.id, ws);
         passwords.set(msg.id, msg.password);
-        console.log(`🔌 Registered ESP: ${msg.id}`);
+        console.log(`📡 Registered ESP: ${msg.id}`);
         break;
 
       case "check_esps":
@@ -78,9 +60,8 @@ wss.on("connection", (ws) => {
             message: "Wrong password"
           }));
         } else {
-          const commandId = msg.commandId || Math.random().toString(36).substr(2, 6);
+          const commandId = Math.random().toString(36).substr(2, 6);
 
-          // Disconnect old ESP if changed
           const lastEspId = lastUsedEspByClient.get(ws);
           if (lastEspId && lastEspId !== msg.targetId) {
             const previousEsp = clients.get(lastEspId);
@@ -94,52 +75,57 @@ wss.on("connection", (ws) => {
 
           lastUsedEspByClient.set(ws, msg.targetId);
 
-          // Remove ws from all old commandId sets
-          for (const [oldCmd, set] of awaitingResponses.entries()) {
-            if (set.has(ws)) {
-              set.delete(ws);
-              if (set.size === 0) awaitingResponses.delete(oldCmd);
+          // Clear any previous command awaiting responses from this client
+          for (const [oldCommandId, clientSet] of awaitingResponses.entries()) {
+            if (clientSet.has(ws)) {
+              clientSet.delete(ws);
+              if (clientSet.size === 0) {
+                awaitingResponses.delete(oldCommandId);
+              }
             }
           }
 
-          // Set current client as waiting
-          if (!awaitingResponses.has(commandId)) {
-            awaitingResponses.set(commandId, new Set());
-          }
-          awaitingResponses.get(commandId).add(ws);
+          // Register this client for response
+          awaitingResponses.set(commandId, new Set([ws]));
 
-          // Send command to target ESP
+          // Send command to ESP
           targetClient.send(JSON.stringify({
             type: "command",
             commandId: commandId,
             message: msg.message
           }));
-
-          console.log(`📤 Sent command to ${msg.targetId} with ID ${commandId}`);
         }
         break;
 
-        case "response":
-          console.log(`Received response for command: ${msg.commandId}`);
-          const responseClients = awaitingResponses.get(msg.commandId);
+      case "response":
+        if (typeof msg.response !== "string") {
+          console.log("⚠️ Invalid response format from ESP");
+          return;
+        }
 
-          if (responseClients && responseClients.size > 0) {
-            console.log(`[RESPONSE] CommandID: ${msg.commandId}`);
-            console.log(`[RESPONSE] Raw content:`, msg.response);
+        const parts = msg.response.split("::");
+        if (parts.length < 2) {
+          console.log("⚠️ Malformed response payload:", msg.response);
+          return;
+        }
 
-            const responseString = JSON.stringify(msg.response);  // ✅ only send the payload
+        const commandId = parts[0];
+        const payload = parts.slice(1).join("::");
 
-            responseClients.forEach(client => {
-              if (client.readyState === WebSocket.OPEN) {
-                client.send(responseString);  // ✅ send clean JSON
-              }
-            });
+        const responseClients = awaitingResponses.get(commandId);
 
-            // Optional: remove if response is final
-            // awaitingResponses.delete(msg.commandId);
-          }
-          break;
+        if (responseClients && responseClients.size > 0) {
+          responseClients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(payload); // ✅ Send raw payload only (no wrapping)
+            }
+          });
 
+          awaitingResponses.delete(commandId);
+        } else {
+          console.log("⚠️ No client awaiting commandId:", commandId);
+        }
+        break;
 
       default:
         console.log("⚠️ Unknown message type:", msg.type);
@@ -148,27 +134,24 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    // Cleanup ESP registration
     for (const [id, client] of clients.entries()) {
       if (client === ws) {
         clients.delete(id);
         passwords.delete(id);
-        console.log(`❌ ESP disconnected: ${id}`);
+        console.log(`📴 ESP disconnected: ${id}`);
         break;
       }
     }
 
-    // Cleanup response waiting
-    for (const [cmdId, clientSet] of awaitingResponses.entries()) {
+    for (const [commandId, clientSet] of awaitingResponses.entries()) {
       if (clientSet.has(ws)) {
         clientSet.delete(ws);
         if (clientSet.size === 0) {
-          awaitingResponses.delete(cmdId);
+          awaitingResponses.delete(commandId);
         }
       }
     }
 
-    // Notify last ESP that client disconnected
     const lastEspId = lastUsedEspByClient.get(ws);
     if (lastEspId) {
       const lastEsp = clients.get(lastEspId);
