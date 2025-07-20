@@ -13,14 +13,14 @@ wss.on("connection", (ws) => {
   console.log("🔌 New client connected");
 
   ws.on("message", (data) => {
-    // Check if the message is raw ESP response (not JSON)
+    const text = typeof data === "string" ? data : data.toString();
+    console.log("⚠️ DATA:", text);
 
-  console.log("⚠️ DATA:", data);
-    
-    if (typeof data === "string" && data.includes("::")) {
-      const delimiterIndex = data.indexOf("::");
-      const commandId = data.substring(0, delimiterIndex);
-      const payload = data.substring(delimiterIndex + 2);
+    // Handle raw ESP response with "::"
+    if (text.includes("::")) {
+      const delimiterIndex = text.indexOf("::");
+      const commandId = text.substring(0, delimiterIndex);
+      const payload = text.substring(delimiterIndex + 2);
 
       console.log(`📩 Raw ESP response for commandId: ${commandId}`);
       console.log(`🧾 Payload: ${payload}`);
@@ -29,7 +29,7 @@ wss.on("connection", (ws) => {
       if (responseClients && responseClients.size > 0) {
         responseClients.forEach(client => {
           if (client.readyState === WebSocket.OPEN) {
-            client.send(payload); // ✅ send raw payload
+            client.send(payload); // Send just the payload to client
           }
         });
 
@@ -40,12 +40,12 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    // Otherwise handle as JSON
+    // Handle JSON messages
     let msg;
     try {
-      msg = JSON.parse(data);
+      msg = JSON.parse(text);
     } catch (e) {
-      console.log("❌ Invalid JSON:", data.toString());
+      console.log("❌ Invalid JSON:", text);
       return;
     }
 
