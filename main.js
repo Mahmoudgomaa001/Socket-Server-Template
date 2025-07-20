@@ -14,6 +14,9 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (data) => {
     // Check if the message is raw ESP response (not JSON)
+
+  console.log("⚠️ DATA:", data);
+    
     if (typeof data === "string" && data.includes("::")) {
       const delimiterIndex = data.indexOf("::");
       const commandId = data.substring(0, delimiterIndex);
