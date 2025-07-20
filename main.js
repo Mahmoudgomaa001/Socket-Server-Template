@@ -119,25 +119,27 @@ wss.on("connection", (ws) => {
         }
         break;
 
-      case "response":
-        console.log(`📨 Got response for command: ${msg.commandId}`);
-        const waitingClients = awaitingResponses.get(msg.commandId);
+        case "response":
+          console.log(`Received response for command: ${msg.commandId}`);
+          const responseClients = awaitingResponses.get(msg.commandId);
 
-        if (waitingClients && waitingClients.size > 0) {
-          waitingClients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-              // Send only the content, without commandId
-              if (msg.response) {
-                client.send(JSON.stringify(msg.response));
-              } else {
-                client.send(JSON.stringify(msg));
+          if (responseClients && responseClients.size > 0) {
+            console.log(`[RESPONSE] CommandID: ${msg.commandId}`);
+            console.log(`[RESPONSE] Raw content:`, msg.response);
+
+            const responseString = JSON.stringify(msg.response);  // ✅ only send the payload
+
+            responseClients.forEach(client => {
+              if (client.readyState === WebSocket.OPEN) {
+                client.send(responseString);  // ✅ send clean JSON
               }
-            }
-          });
-          // Optionally clear after response
-          // awaitingResponses.delete(msg.commandId);
-        }
-        break;
+            });
+
+            // Optional: remove if response is final
+            // awaitingResponses.delete(msg.commandId);
+          }
+          break;
+
 
       default:
         console.log("⚠️ Unknown message type:", msg.type);
