@@ -13,11 +13,36 @@ wss.on("connection", (ws) => {
   console.log("🔌 New client connected");
 
   ws.on("message", (data) => {
+    // Check if the message is raw ESP response (not JSON)
+    if (typeof data === "string" && data.includes("::")) {
+      const delimiterIndex = data.indexOf("::");
+      const commandId = data.substring(0, delimiterIndex);
+      const payload = data.substring(delimiterIndex + 2);
+
+      console.log(`📩 Raw ESP response for commandId: ${commandId}`);
+      console.log(`🧾 Payload: ${payload}`);
+
+      const responseClients = awaitingResponses.get(commandId);
+      if (responseClients && responseClients.size > 0) {
+        responseClients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(payload); // ✅ send raw payload
+          }
+        });
+
+        awaitingResponses.delete(commandId);
+      } else {
+        console.log("⚠️ No client awaiting commandId:", commandId);
+      }
+      return;
+    }
+
+    // Otherwise handle as JSON
     let msg;
     try {
       msg = JSON.parse(data);
     } catch (e) {
-      console.log("❌ Invalid JSON:", data);
+      console.log("❌ Invalid JSON:", data.toString());
       return;
     }
 
@@ -75,7 +100,7 @@ wss.on("connection", (ws) => {
 
           lastUsedEspByClient.set(ws, msg.targetId);
 
-          // Clear any previous command awaiting responses from this client
+          // Clear previous waiting responses
           for (const [oldCommandId, clientSet] of awaitingResponses.entries()) {
             if (clientSet.has(ws)) {
               clientSet.delete(ws);
@@ -85,7 +110,7 @@ wss.on("connection", (ws) => {
             }
           }
 
-          // Register this client for response
+          // Register for response
           awaitingResponses.set(commandId, new Set([ws]));
 
           // Send command to ESP
@@ -94,36 +119,6 @@ wss.on("connection", (ws) => {
             commandId: commandId,
             message: msg.message
           }));
-        }
-        break;
-
-      case "response":
-        if (typeof msg.response !== "string") {
-          console.log("⚠️ Invalid response format from ESP");
-          return;
-        }
-
-        const parts = msg.response.split("::");
-        if (parts.length < 2) {
-          console.log("⚠️ Malformed response payload:", msg.response);
-          return;
-        }
-
-        const commandId = parts[0];
-        const payload = parts.slice(1).join("::");
-
-        const responseClients = awaitingResponses.get(commandId);
-
-        if (responseClients && responseClients.size > 0) {
-          responseClients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(payload); // ✅ Send raw payload only (no wrapping)
-            }
-          });
-
-          awaitingResponses.delete(commandId);
-        } else {
-          console.log("⚠️ No client awaiting commandId:", commandId);
         }
         break;
 
