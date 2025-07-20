@@ -47,7 +47,7 @@ wss.on("connection", (ws) => {
           passwords.set(msg.id, msg.password);
           ws.clientId = msg.id;
           ws.isESP = true;
-          ws.send(JSON.stringify({ success: "ESP registered successfully" }));
+          // ws.send(JSON.stringify({ success: "ESP registered successfully" }));
           break;
         }
 
@@ -90,13 +90,13 @@ wss.on("connection", (ws) => {
           break;
 
         default:
-          ws.send(JSON.stringify({ error: "Unknown message type" }));
+          // ws.send(JSON.stringify({ error: "Unknown message type" }));
           break;
       }
 
     } catch (err) {
       console.error("❌ Error handling message:", err.message);
-      ws.send(JSON.stringify({ error: "Invalid message format" }));
+      // ws.send(JSON.stringify({ error: "Invalid message format" }));
     }
   });
 
