@@ -29,7 +29,7 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (data) => {
     const text = typeof data === "string" ? data : data.toString();
-    console.log("⚠️ DATA:", text);
+    
 
     // Handle raw ESP response with "::"
     if (text.includes("::")) {
@@ -56,7 +56,7 @@ wss.on("connection", (ws) => {
           }
         });
 
-        awaitingResponses.delete(commandId);
+        // awaitingResponses.delete(commandId);
       } else {
         console.log("⚠️ No client awaiting commandId:", commandId);
       }
