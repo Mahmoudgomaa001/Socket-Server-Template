@@ -9,6 +9,21 @@ const lastUsedEspByClient = new Map(); // WebSocket => ESP ID
 
 console.log("✅ WebSocket server started on port 8080");
 
+// Helper function to safely send data with logging
+function safeSend(ws, message) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(message, (err) => {
+      if (err) {
+        console.error("❌ Send failed:", err.message);
+      } else {
+        console.log("📤 Message sent:", message);
+      }
+    });
+  } else {
+    console.warn("⚠️ Tried to send to closed client");
+  }
+}
+
 wss.on("connection", (ws) => {
   console.log("🔌 New client connected");
 
@@ -29,7 +44,15 @@ wss.on("connection", (ws) => {
       if (responseClients && responseClients.size > 0) {
         responseClients.forEach(client => {
           if (client.readyState === WebSocket.OPEN) {
-            client.send(payload); // Send just the payload to client
+            client.send(payload, (err) => {
+              if (err) {
+                console.error(`❌ Failed to send to client: ${err.message}`);
+              } else {
+                console.log(`✅ Sent to client (${commandId}):`, payload);
+              }
+            });
+          } else {
+            console.warn("⚠️ Client not open, cannot send response");
           }
         });
 
@@ -67,7 +90,7 @@ wss.on("connection", (ws) => {
           };
         });
 
-        ws.send(JSON.stringify({
+        safeSend(ws, JSON.stringify({
           type: "check_results",
           results: results
         }));
@@ -78,12 +101,12 @@ wss.on("connection", (ws) => {
         const correctPassword = passwords.get(msg.targetId);
 
         if (!targetClient) {
-          ws.send(JSON.stringify({
+          safeSend(ws, JSON.stringify({
             type: "error",
             message: "ESP not online"
           }));
         } else if (correctPassword !== msg.password) {
-          ws.send(JSON.stringify({
+          safeSend(ws, JSON.stringify({
             type: "error",
             message: "Wrong password"
           }));
@@ -121,7 +144,13 @@ wss.on("connection", (ws) => {
             type: "command",
             commandId: commandId,
             message: msg.message
-          }));
+          }), (err) => {
+            if (err) {
+              console.error(`❌ Failed to send command to ESP: ${err.message}`);
+            } else {
+              console.log(`📤 Command sent to ESP ${msg.targetId} (commandId: ${commandId})`);
+            }
+          });
         }
         break;
 
