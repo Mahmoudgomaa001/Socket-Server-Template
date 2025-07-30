@@ -1,15 +1,44 @@
+const express = require("express");
 const WebSocket = require("ws");
+const fetch = require("node-fetch");
 
-const wss = new WebSocket.Server({ port: 8080 });
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// -------- Serve firmware file from GitHub as a proxy with required headers --------
+app.get("/firmware.bin", async (req, res) => {
+  const githubUrl = "https://raw.githubusercontent.com/Mahmoudgomaa001/yono_qr_update/main/firmware.bin";
+  try {
+    const response = await fetch(githubUrl);
+    if (!response.ok) throw new Error("Failed to fetch from GitHub");
+
+    const buffer = await response.buffer();
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.setHeader("Content-Length", buffer.length);
+    res.setHeader("Connection", "close");
+    res.send(buffer);
+  } catch (err) {
+    console.error("❌ Firmware fetch error:", err.message);
+    res.status(500).send("Firmware fetch failed");
+  }
+});
+
+// -------- Start Express HTTP Server --------
+const server = app.listen(PORT, () => {
+  console.log("✅ HTTP server running on port", PORT);
+});
+
+// -------- WebSocket Server on same HTTP server --------
+const wss = new WebSocket.Server({ server });
 
 const clients = new Map();             // id => WebSocket
 const passwords = new Map();           // id => password
 const awaitingResponses = new Map();   // commandId => Set of WebSockets
 const lastUsedEspByClient = new Map(); // WebSocket => ESP ID
 
-console.log("✅ WebSocket server started on port 8080");
+console.log("✅ WebSocket server started");
 
-// Helper function to safely send data with logging
+// -------- Safe send helper --------
 function safeSend(ws, message) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(message, (err) => {
@@ -24,14 +53,15 @@ function safeSend(ws, message) {
   }
 }
 
+// -------- WebSocket Connection Handler --------
 wss.on("connection", (ws) => {
   console.log("🔌 New client connected");
 
   ws.on("message", (data) => {
     const text = typeof data === "string" ? data : data.toString();
-    
+    console.log("📨 Incoming message:", text);
 
-    // Handle raw ESP response with "::"
+    // Raw ESP response with ::
     if (text.includes("::")) {
       const delimiterIndex = text.indexOf("::");
       const commandId = text.substring(0, delimiterIndex);
@@ -56,6 +86,7 @@ wss.on("connection", (ws) => {
           }
         });
 
+        // Optionally remove once responded
         // awaitingResponses.delete(commandId);
       } else {
         console.log("⚠️ No client awaiting commandId:", commandId);
@@ -113,6 +144,7 @@ wss.on("connection", (ws) => {
         } else {
           const commandId = Math.random().toString(36).substr(2, 6);
 
+          // Disconnect from previous ESP if switched
           const lastEspId = lastUsedEspByClient.get(ws);
           if (lastEspId && lastEspId !== msg.targetId) {
             const previousEsp = clients.get(lastEspId);
@@ -123,10 +155,9 @@ wss.on("connection", (ws) => {
               }));
             }
           }
-
           lastUsedEspByClient.set(ws, msg.targetId);
 
-          // Clear previous waiting responses
+          // Clear any old registrations
           for (const [oldCommandId, clientSet] of awaitingResponses.entries()) {
             if (clientSet.has(ws)) {
               clientSet.delete(ws);
@@ -136,10 +167,9 @@ wss.on("connection", (ws) => {
             }
           }
 
-          // Register for response
           awaitingResponses.set(commandId, new Set([ws]));
 
-          // Send command to ESP
+          // Send command
           targetClient.send(JSON.stringify({
             type: "command",
             commandId: commandId,
