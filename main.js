@@ -53,9 +53,56 @@ function safeSend(ws, message) {
   }
 }
 
+// -------- Cleanup helper for disconnected WebSockets --------
+function cleanupWebSocket(ws) {
+  // Remove from ESP clients registry
+  for (const [id, client] of clients.entries()) {
+    if (client === ws) {
+      clients.delete(id);
+      passwords.delete(id);
+      console.log(`📴 ESP disconnected: ${id}`);
+      break;
+    }
+  }
+
+  // Remove from awaiting responses
+  for (const [commandId, clientSet] of awaitingResponses.entries()) {
+    if (clientSet.has(ws)) {
+      clientSet.delete(ws);
+      if (clientSet.size === 0) {
+        awaitingResponses.delete(commandId);
+      }
+    }
+  }
+
+  // Notify last connected ESP that client disconnected
+  const lastEspId = lastUsedEspByClient.get(ws);
+  if (lastEspId) {
+    const lastEsp = clients.get(lastEspId);
+    if (lastEsp && lastEsp.readyState === WebSocket.OPEN) {
+      lastEsp.send(JSON.stringify({
+        type: "disconnect",
+        reason: "client disconnected"
+      }));
+    }
+    lastUsedEspByClient.delete(ws);
+  }
+}
+
 // -------- WebSocket Connection Handler --------
 wss.on("connection", (ws) => {
   console.log("🔌 New client connected");
+
+  // ✅ FIX: Handle WebSocket errors to prevent server crash
+  ws.on("error", (err) => {
+    console.error("❌ WebSocket error:", err.message);
+    // Clean up this socket — it's no longer usable
+    cleanupWebSocket(ws);
+    // Force-close if still lingering
+    try {
+      ws.terminate();
+    } catch (_) {}
+  });
 
   ws.on("message", (data) => {
     const text = typeof data === "string" ? data : data.toString();
@@ -85,9 +132,6 @@ wss.on("connection", (ws) => {
             console.warn("⚠️ Client not open, cannot send response");
           }
         });
-
-        // Optionally remove once responded
-        // awaitingResponses.delete(commandId);
       } else {
         console.log("⚠️ No client awaiting commandId:", commandId);
       }
@@ -191,34 +235,6 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    for (const [id, client] of clients.entries()) {
-      if (client === ws) {
-        clients.delete(id);
-        passwords.delete(id);
-        console.log(`📴 ESP disconnected: ${id}`);
-        break;
-      }
-    }
-
-    for (const [commandId, clientSet] of awaitingResponses.entries()) {
-      if (clientSet.has(ws)) {
-        clientSet.delete(ws);
-        if (clientSet.size === 0) {
-          awaitingResponses.delete(commandId);
-        }
-      }
-    }
-
-    const lastEspId = lastUsedEspByClient.get(ws);
-    if (lastEspId) {
-      const lastEsp = clients.get(lastEspId);
-      if (lastEsp && lastEsp.readyState === WebSocket.OPEN) {
-        lastEsp.send(JSON.stringify({
-          type: "disconnect",
-          reason: "client disconnected"
-        }));
-      }
-      lastUsedEspByClient.delete(ws);
-    }
+    cleanupWebSocket(ws);
   });
 });
