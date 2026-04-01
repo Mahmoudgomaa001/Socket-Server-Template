@@ -5,9 +5,10 @@ const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// -------- Serve firmware file from GitHub as a proxy with required headers --------
+// -------- Serve firmware file from GitHub as a proxy --------
 app.get("/firmware.bin", async (req, res) => {
-  const githubUrl = "https://raw.githubusercontent.com/Mahmoudgomaa001/yono_qr_update/main/firmware.bin";
+  const githubUrl =
+    "https://raw.githubusercontent.com/Mahmoudgomaa001/yono_qr_update/main/firmware.bin";
   try {
     const response = await fetch(githubUrl);
     if (!response.ok) throw new Error("Failed to fetch from GitHub");
@@ -28,13 +29,16 @@ const server = app.listen(PORT, () => {
   console.log("✅ HTTP server running on port", PORT);
 });
 
-// -------- WebSocket Server on same HTTP server --------
-const wss = new WebSocket.Server({ server });
+// -------- WebSocket Server --------
+const wss = new WebSocket.Server({
+  server,
+  skipUTF8Validation: true, // ✅ PREVENT UTF-8 CRASH
+});
 
-const clients = new Map();             // id => WebSocket
-const passwords = new Map();           // id => password
-const awaitingResponses = new Map();   // commandId => Set of WebSockets
-const lastUsedEspByClient = new Map(); // WebSocket => ESP ID
+const clients = new Map();
+const passwords = new Map();
+const awaitingResponses = new Map();
+const lastUsedEspByClient = new Map();
 
 console.log("✅ WebSocket server started");
 
@@ -57,11 +61,36 @@ function safeSend(ws, message) {
 wss.on("connection", (ws) => {
   console.log("🔌 New client connected");
 
-  ws.on("message", (data) => {
-    const text = typeof data === "string" ? data : data.toString();
+  // ✅ PREVENT SERVER CRASH
+  ws.on("error", (err) => {
+    console.error("⚠️ WebSocket error:", err.message);
+  });
+
+  ws.on("message", (data, isBinary) => {
+    let text;
+
+    // ✅ Ignore binary garbage
+    if (isBinary) {
+      console.warn("⚠️ Ignored binary message");
+      return;
+    }
+
+    // ✅ Safe decode
+    try {
+      text = data.toString("utf8");
+    } catch (e) {
+      console.error("❌ Invalid UTF-8 message dropped");
+      return;
+    }
+
+    if (!text || text.length > 5000) {
+      console.warn("⚠️ Suspicious message dropped");
+      return;
+    }
+
     console.log("📨 Incoming message:", text);
 
-    // Raw ESP response with ::
+    // -------- RAW ESP RESPONSE (:: format) --------
     if (text.includes("::")) {
       const delimiterIndex = text.indexOf("::");
       const commandId = text.substring(0, delimiterIndex);
@@ -71,8 +100,9 @@ wss.on("connection", (ws) => {
       console.log(`🧾 Payload: ${payload}`);
 
       const responseClients = awaitingResponses.get(commandId);
+
       if (responseClients && responseClients.size > 0) {
-        responseClients.forEach(client => {
+        responseClients.forEach((client) => {
           if (client.readyState === WebSocket.OPEN) {
             client.send(payload, (err) => {
               if (err) {
@@ -81,20 +111,15 @@ wss.on("connection", (ws) => {
                 console.log(`✅ Sent to client (${commandId}):`, payload);
               }
             });
-          } else {
-            console.warn("⚠️ Client not open, cannot send response");
           }
         });
-
-        // Optionally remove once responded
-        // awaitingResponses.delete(commandId);
       } else {
         console.log("⚠️ No client awaiting commandId:", commandId);
       }
       return;
     }
 
-    // Handle JSON messages
+    // -------- JSON HANDLING --------
     let msg;
     try {
       msg = JSON.parse(text);
@@ -114,17 +139,21 @@ wss.on("connection", (ws) => {
         const results = msg.devices.map((device) => {
           const client = clients.get(device.id);
           const storedPassword = passwords.get(device.id);
+
           return {
             id: device.id,
             online: !!client,
-            auth: storedPassword === device.password
+            auth: storedPassword === device.password,
           };
         });
 
-        safeSend(ws, JSON.stringify({
-          type: "check_results",
-          results: results
-        }));
+        safeSend(
+          ws,
+          JSON.stringify({
+            type: "check_results",
+            results: results,
+          }),
+        );
         break;
 
       case "command":
@@ -132,56 +161,75 @@ wss.on("connection", (ws) => {
         const correctPassword = passwords.get(msg.targetId);
 
         if (!targetClient) {
-          safeSend(ws, JSON.stringify({
-            type: "error",
-            message: "ESP not online"
-          }));
-        } else if (correctPassword !== msg.password) {
-          safeSend(ws, JSON.stringify({
-            type: "error",
-            message: "Wrong password"
-          }));
-        } else {
-          const commandId = Math.random().toString(36).substr(2, 6);
+          safeSend(
+            ws,
+            JSON.stringify({
+              type: "error",
+              message: "ESP not online",
+            }),
+          );
+          return;
+        }
 
-          // Disconnect from previous ESP if switched
-          const lastEspId = lastUsedEspByClient.get(ws);
-          if (lastEspId && lastEspId !== msg.targetId) {
-            const previousEsp = clients.get(lastEspId);
-            if (previousEsp && previousEsp.readyState === WebSocket.OPEN) {
-              previousEsp.send(JSON.stringify({
+        if (correctPassword !== msg.password) {
+          safeSend(
+            ws,
+            JSON.stringify({
+              type: "error",
+              message: "Wrong password",
+            }),
+          );
+          return;
+        }
+
+        const commandId = Math.random().toString(36).substr(2, 6);
+
+        // Disconnect from previous ESP
+        const lastEspId = lastUsedEspByClient.get(ws);
+        if (lastEspId && lastEspId !== msg.targetId) {
+          const previousEsp = clients.get(lastEspId);
+          if (previousEsp && previousEsp.readyState === WebSocket.OPEN) {
+            previousEsp.send(
+              JSON.stringify({
                 type: "disconnect",
-                reason: "client switched ESP"
-              }));
+                reason: "client switched ESP",
+              }),
+            );
+          }
+        }
+
+        lastUsedEspByClient.set(ws, msg.targetId);
+
+        // Clear old waiting
+        for (const [oldCommandId, clientSet] of awaitingResponses.entries()) {
+          if (clientSet.has(ws)) {
+            clientSet.delete(ws);
+            if (clientSet.size === 0) {
+              awaitingResponses.delete(oldCommandId);
             }
           }
-          lastUsedEspByClient.set(ws, msg.targetId);
+        }
 
-          // Clear any old registrations
-          for (const [oldCommandId, clientSet] of awaitingResponses.entries()) {
-            if (clientSet.has(ws)) {
-              clientSet.delete(ws);
-              if (clientSet.size === 0) {
-                awaitingResponses.delete(oldCommandId);
-              }
-            }
-          }
+        awaitingResponses.set(commandId, new Set([ws]));
 
-          awaitingResponses.set(commandId, new Set([ws]));
-
-          // Send command
-          targetClient.send(JSON.stringify({
+        // Send command
+        targetClient.send(
+          JSON.stringify({
             type: "command",
             commandId: commandId,
-            message: msg.message
-          }), (err) => {
+            message: msg.message,
+          }),
+          (err) => {
             if (err) {
-              console.error(`❌ Failed to send command to ESP: ${err.message}`);
+              console.error(`❌ Failed to send command: ${err.message}`);
             } else {
-              console.log(`📤 Command sent to ESP ${msg.targetId} (commandId: ${commandId})`);
+              console.log(
+                `📤 Command sent to ESP ${msg.targetId} (${commandId})`,
+              );
             }
-          });
-        }
+          },
+        );
+
         break;
 
       default:
@@ -191,6 +239,8 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
+    console.log("🔌 Client disconnected");
+
     for (const [id, client] of clients.entries()) {
       if (client === ws) {
         clients.delete(id);
@@ -213,10 +263,12 @@ wss.on("connection", (ws) => {
     if (lastEspId) {
       const lastEsp = clients.get(lastEspId);
       if (lastEsp && lastEsp.readyState === WebSocket.OPEN) {
-        lastEsp.send(JSON.stringify({
-          type: "disconnect",
-          reason: "client disconnected"
-        }));
+        lastEsp.send(
+          JSON.stringify({
+            type: "disconnect",
+            reason: "client disconnected",
+          }),
+        );
       }
       lastUsedEspByClient.delete(ws);
     }
