@@ -157,12 +157,12 @@ button.loading::after{content:"";position:absolute;left:50%;top:50%;width:18px;h
 // ============================================================
 // CONFIG
 // ============================================================
-var SERVER_HOST = "socket-server-template.onrender.com";
-var WS_URL      = "wss://" + SERVER_HOST + "/";
-var LOG_URL     = "https://" + SERVER_HOST + "/log";
-var DEFAULT_PASS = "11110000";   // matches the ESP's resetSettings() default
-var TICK        = 100;
-var RECONNECT   = 2500;
+var SERVER_HOST  = "socket-server-template.onrender.com";
+var WS_URL       = "wss://" + SERVER_HOST + "/";
+var LOG_URL      = "https://" + SERVER_HOST + "/log";
+var DEFAULT_PASS = "11110000";
+var TICK         = 100;
+var RECONNECT    = 2500;
 
 // ============================================================
 // LocalStorage keys
@@ -188,7 +188,6 @@ var S = {
   session: null,
   sending: false,
   busy:    false,
-  lastSendAt: 0,
   beeped:  false,
   tickTimer: null,
   verifyTimer: null
@@ -210,9 +209,11 @@ var L = {
     motOn:"المحرك يعمل", motOff:"المحرك متوقف",
     sIdle:"جاهز", sSend:"📤 إرسال الأمر…", sRun:"🟢 المحرك يعمل",
     sErr:"⚠️ فشل الإرسال", sKick:"⚠️ تم التحكم من جهاز آخر",
+    sBusy:"⚠️ الجهاز مشغول",
     noSession:"لا توجد جلسة", startedBy:"بدأها", minLabel:"دقيقة",
     stopBtn:"إيقاف", offlineText:"⚠️ الجهاز غير متصل بالإنترنت",
-    confirmStop:"إيقاف الآن؟", timeEnded:"انتهت المدة", wantLogout:"خروج؟"
+    confirmStart:"تشغيل لمدة {m} دقيقة؟", confirmStop:"إيقاف الآن؟",
+    timeEnded:"انتهت المدة", wantLogout:"خروج؟"
   },
   en: {
     appTitle:"Yonova Relay", loginHint:"Sign in",
@@ -226,9 +227,11 @@ var L = {
     motOn:"Motor ON", motOff:"Motor OFF",
     sIdle:"Ready", sSend:"📤 Sending…", sRun:"🟢 Motor running",
     sErr:"⚠️ Send failed", sKick:"⚠️ Taken over by another client",
+    sBusy:"⚠️ Device busy",
     noSession:"No session", startedBy:"started by", minLabel:"min",
     stopBtn:"Stop", offlineText:"⚠️ Device not connected",
-    confirmStop:"Stop now?", timeEnded:"Time is up", wantLogout:"Log out?"
+    confirmStart:"Start for {m} min?", confirmStop:"Stop now?",
+    timeEnded:"Time is up", wantLogout:"Log out?"
   }
 };
 function t(k){ return L[S.lang][k] || k; }
@@ -332,6 +335,7 @@ function onWsMessage(ev){
   }
 
   if (msg){
+    // ---- login verification ----
     if (msg.type === "check_results" && msg.results){
       var r = msg.results[0];
       if (r && r.online && r.auth){
@@ -348,19 +352,59 @@ function onWsMessage(ev){
       render();
       return;
     }
+
+    // ---- server error (busy, wrong password, etc.) ----
     if (msg.type === "error"){
-      S.sending = false; render();
+      S.sending = false;
+      setCls($("stage"), "stage s-err");
+      setText($("stageText"), msg.message || t("sErr"));
+      render();
       return;
     }
+
+    // ---- kicked by another client (legacy path) ----
     if (msg.type === "disconnect"){
       handleKicked();
       return;
     }
+
+    // ---- live session broadcasts ----
+    if (msg.type === "session_snapshot" || msg.type === "session_start"){
+      if (msg.session && msg.session.running &&
+          Date.parse(msg.session.endTimeUTC) > Date.now()){
+        S.session = {
+          device: S.device,
+          tag: msg.session.startedBy,
+          durationMin: msg.session.durationMin,
+          endMs: Date.parse(msg.session.endTimeUTC)
+        };
+        localStorage.setItem(LS.session, JSON.stringify(S.session));
+        S.beeped = false;
+        S.sending = false;
+      } else {
+        S.session = null;
+        localStorage.removeItem(LS.session);
+      }
+      render();
+      return;
+    }
+
+    if (msg.type === "session_end"){
+      S.session = null;
+      localStorage.removeItem(LS.session);
+      S.beeped = false;
+      S.sending = false;
+      render();
+      return;
+    }
+
     return;
   }
 
+  // ---- raw text from ESP (relay on / off replies etc.) ----
   if (typeof raw === "string" && raw.length){
-    S.sending = false; render();
+    S.sending = false;
+    render();
   }
 }
 
@@ -402,7 +446,7 @@ $("loginBtn").onclick = function(){
 };
 
 // ============================================================
-// Enter main
+// Enter main view
 // ============================================================
 function enterMain(){
   $("loginBtn").classList.remove("loading");
@@ -412,16 +456,19 @@ function enterMain(){
   setHid($("logoutBtn"), false);
   setText($("info"), t("startedBy") + " " + S.tag + " · " + S.device);
 
+  // Subscribe to live state for this ESP
+  sendJson({ type: "watch_esp", espId: S.device });
+
+  // If we had a saved local session, optimistically show it until the
+  // snapshot arrives from the server.
   var saved = localStorage.getItem(LS.session);
   if (saved){
     try{
       var s = JSON.parse(saved);
       if (s && s.device === S.device && s.endMs > Date.now()){
         S.session = s;
-        sendCommand("m1r_on", true);   // safety re-arm
       } else {
         localStorage.removeItem(LS.session);
-        sendCommand("m1r_off", true);  // session expired while away — make sure relay is off
       }
     } catch(_){
       localStorage.removeItem(LS.session);
@@ -441,20 +488,8 @@ $("logoutBtn").onclick = function(){
 };
 
 // ============================================================
-// Commands
+// Log helper (fire & forget)
 // ============================================================
-function sendCommand(message, silent){
-  if (!S.wsReady) return false;
-  var ok = sendJson({
-    type: "command",
-    targetId: S.device,
-    password: DEFAULT_PASS,
-    message: message
-  });
-  if (ok) S.lastSendAt = Date.now();
-  return ok;
-}
-
 function logToServer(device, tag, action, duration){
   try{
     fetch(LOG_URL, {
@@ -466,64 +501,49 @@ function logToServer(device, tag, action, duration){
 }
 
 // ============================================================
-// Start
+// Start session — server-driven
 // ============================================================
 function startSession(min, btn){
   if (S.busy) return;
+  if (!confirm(t("confirmStart").replace("{m}", min))) return;
+
   S.busy = true;
   S.sending = true;
   if (btn) btn.classList.add("loading");
   render();
 
-  if (!sendCommand("m1r_on")){
-    S.busy = false; S.sending = false;
-    if (btn) btn.classList.remove("loading");
-    setCls($("stage"), "stage s-err");
-    setText($("stageText"), t("sErr"));
-    render();
-    return;
-  }
-
-  var now = Date.now();
-  S.session = {
-    device: S.device,
+  sendJson({
+    type: "session_start",
+    espId: S.device,
     tag: S.tag,
-    durationMin: min,
-    startMs: now,
-    endMs: now + min * 60000
-  };
-  localStorage.setItem(LS.session, JSON.stringify(S.session));
-  S.beeped = false;
+    minutes: min,
+    password: DEFAULT_PASS
+  });
 
   logToServer(S.device, S.tag, "start", min);
 
-  S.busy = false;
   setTimeout(function(){
-    if (S.sending) S.sending = false;
+    S.busy = false;
+    S.sending = false;
     if (btn) btn.classList.remove("loading");
     render();
-  }, 400);
-
-  render();
+  }, 500);
 }
 
 // ============================================================
-// Stop
+// Stop session — server-driven
 // ============================================================
 function stopSession(auto){
-  if (!S.session) return;
   if (!auto && !confirm(t("confirmStop"))) return;
-  var dur = S.session.durationMin;
-  sendCommand("m1r_off");
-  logToServer(S.device, S.tag, auto ? "expire" : "stop", dur);
-  S.session = null;
-  localStorage.removeItem(LS.session);
-  S.beeped = false;
-  S.busy = false;
-  render();
+  sendJson({
+    type: "session_stop",
+    espId: S.device,
+    tag: S.tag,
+    password: DEFAULT_PASS
+  });
 }
 
-// Wire duration buttons
+// Wire buttons
 var durBtns = $("durGrid").querySelectorAll("button");
 for (var i=0;i<durBtns.length;i++){
   (function(b){
@@ -557,9 +577,12 @@ function render(){
   var cd = $("cd");
   if (running){
     cd.className = "cd run";
+    setText($("info"), t("startedBy") + " " + (S.session.tag || "?")
+      + " · " + S.session.durationMin + " " + t("minLabel"));
   } else {
     cd.className = "cd idle";
     setText(cd, "--:--");
+    setText($("info"), t("noSession"));
   }
 
   $("stopBtn").disabled = !(running && S.wsReady && !S.busy);
@@ -585,10 +608,15 @@ function tick(){
     if (!S.beeped){
       S.beeped = true;
       beep();
-      stopSession(true);
+      // The ESP turns itself off; server broadcasts session_end.
+      // We clear local state and wait for the broadcast.
+      S.session = null;
+      localStorage.removeItem(LS.session);
+      render();
     }
     return;
   }
+
   S.beeped = false;
   var s = Math.floor(left / 1000);
   var m = Math.floor(s / 60);
@@ -605,7 +633,7 @@ function tick(){
 }
 
 // ============================================================
-// Kicked by another client
+// Kicked by another client (legacy)
 // ============================================================
 function handleKicked(){
   S.session = null;
@@ -630,10 +658,14 @@ function beep(){
 }
 
 // ============================================================
-// Visibility — re-verify on return if idle
+// Visibility — re-verify if idle
 // ============================================================
 document.addEventListener("visibilitychange", function(){
-  if (!document.hidden && S.device && S.wsReady && !S.session) verifyLogin();
+  if (!document.hidden && S.device && S.wsReady){
+    // Re-subscribe (cheap, idempotent) and verify
+    sendJson({ type: "watch_esp", espId: S.device });
+    if (!S.session) verifyLogin();
+  }
 });
 
 // ============================================================
