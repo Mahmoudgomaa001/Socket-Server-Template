@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f8b8d">
+<title>Yonova Relay</title>
+<style>
+:root{
+  --bg:#f4f5f7;--card:#fff;--text:#111;--muted:#6b7280;--border:#e5e7eb;
+  --accent:#0f8b8d;--accent-dark:#0a6b6d;--danger:#d64545;--ok:#16a34a;
+  --off:#9ca3af;--warn:#d97706;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0f1115;--card:#171a21;--text:#e6e8ee;--muted:#8b93a3;
+  --accent:#22c3a6;--accent-dark:#17a48b;--danger:#ff6b6b;--ok:#4ddb8f;
+  --off:#6b7280;--warn:#f59e0b;--border:#23262f;
+}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html[dir=rtl]{font-family:Tahoma,"Segoe UI",system-ui,sans-serif}
+html[dir=ltr]{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);min-height:100vh;font-size:16px}
+.wrap{max-width:480px;margin:0 auto;padding:16px}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+h1{font-size:1.1rem;margin:0;font-weight:700}
+.card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:14px;
+  border:1px solid var(--border)}
+.muted{color:var(--muted);font-size:.9rem}
+.center{text-align:center}
+.row{display:flex;align-items:center;gap:8px}
+.between{justify-content:space-between}
+.hidden{display:none!important}
+label{display:block;font-size:.78rem;color:var(--muted);margin:10px 0 4px;font-weight:600}
+input{width:100%;padding:12px 14px;font-size:1rem;border-radius:10px;
+  border:1.5px solid var(--border);background:var(--bg);color:var(--text);
+  font-weight:600;transition:border-color .15s}
+input:focus{outline:none;border-color:var(--accent)}
+input.tag{text-align:center;letter-spacing:4px}
+input::placeholder{color:var(--off);font-weight:400;letter-spacing:normal}
+
+.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;
+  border-radius:999px;font-size:.78rem;font-weight:600;color:#fff;white-space:nowrap}
+.pill-ok{background:var(--ok)}.pill-off{background:var(--off)}
+.pill-bad{background:var(--danger)}.pill-warn{background:var(--warn)}
+.dot{width:8px;height:8px;border-radius:50%;background:#fff;
+  box-shadow:0 0 0 2px rgba(255,255,255,.35)}
+
+.stage{text-align:center;padding:14px;border-radius:12px;margin-bottom:12px;
+  font-weight:600;font-size:1rem;transition:all .2s}
+.s-idle{background:var(--bg);color:var(--muted)}
+.s-send{background:var(--warn);color:#fff}
+.s-run{background:var(--ok);color:#fff}
+.s-err{background:var(--danger);color:#fff}
+
+.cd{font-size:4rem;font-weight:700;letter-spacing:5px;text-align:center;
+  font-variant-numeric:tabular-nums;line-height:1.05;padding:8px 0;color:var(--ok)}
+.cd.idle{color:var(--muted);letter-spacing:2px;font-size:2.6rem}
+.cd.urgent{color:var(--danger)}
+.info{text-align:center;font-size:.9rem;color:var(--muted);min-height:1.3em}
+
+button{border:none;border-radius:12px;padding:14px 0;font-size:1rem;font-weight:600;
+  cursor:pointer;color:#fff;background:var(--accent);width:100%;font-family:inherit;
+  transition:background .15s,transform .05s,opacity .15s;margin-top:12px}
+button:active:not(:disabled){transform:translateY(1px)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.ghost{background:transparent;color:var(--muted);border:1px solid var(--border);
+  padding:6px 10px;font-size:.85rem;width:auto;border-radius:8px;font-weight:500;margin-top:0}
+.dur{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:4px}
+.dur button{padding:22px 0;font-size:1.3rem;margin-top:0;background:var(--accent)}
+.dur button.active{background:var(--accent-dark);box-shadow:inset 0 0 0 3px rgba(255,255,255,.3)}
+.stop{background:var(--danger)}
+
+.banner{color:#fff;padding:10px 12px;border-radius:10px;margin-bottom:12px;
+  font-weight:600;text-align:center;font-size:.9rem}
+.banner-err{background:var(--danger)}
+#loginMsg{margin-top:8px;font-size:.88rem;color:var(--danger);min-height:1.2em;text-align:center}
+
+button.loading{position:relative;color:transparent!important}
+button.loading::after{content:"";position:absolute;left:50%;top:50%;width:18px;height:18px;
+  margin:-9px 0 0 -9px;border:2.5px solid rgba(255,255,255,.35);border-top-color:#fff;
+  border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <h1 id="appTitle">Yonova Relay</h1>
+    <div class="row">
+      <button class="ghost" id="langBtn">EN</button>
+      <button class="ghost" id="themeBtn">🌙</button>
+      <button class="ghost hidden" id="logoutBtn">⎋</button>
+    </div>
+  </div>
+
+  <!-- ============ LOGIN ============ -->
+  <div class="card" id="loginCard">
+    <div class="row between" style="margin-bottom:4px">
+      <span class="muted" id="loginHint">تسجيل الدخول</span>
+      <span class="pill pill-off" id="wsPill">
+        <span class="dot"></span><span id="wsText">—</span></span>
+    </div>
+
+    <label id="lblDev">اسم الجهاز (ID)</label>
+    <input id="devInput" type="text" autocomplete="off"
+           placeholder="ABCD1234" maxlength="16" spellcheck="false">
+
+    <label id="lblTag">رقم التاج</label>
+    <input id="tagInput" class="tag" type="tel" inputmode="numeric"
+           pattern="[0-9]*" autocomplete="off" placeholder="12345678" maxlength="12">
+
+    <button id="loginBtn">دخول</button>
+    <div id="loginMsg"></div>
+  </div>
+
+  <!-- ============ MAIN ============ -->
+  <div id="mainView" class="hidden">
+
+    <div class="banner banner-err hidden" id="offlineBanner">
+      <span id="offlineText">⚠️ الجهاز غير متصل</span></div>
+
+    <div class="stage s-idle" id="stage"><span id="stageText">جاهز</span></div>
+
+    <div class="card">
+      <div class="cd idle" id="cd">--:--</div>
+      <div class="info" id="info">—</div>
+    </div>
+
+    <div class="card">
+      <div class="row between" style="gap:6px;flex-wrap:wrap">
+        <div class="pill pill-off" id="pWs"><span class="dot"></span><span id="tWs">—</span></div>
+        <div class="pill pill-off" id="pDev"><span class="dot"></span><span id="tDev">—</span></div>
+        <div class="pill pill-off" id="pMot"><span class="dot"></span><span id="tMot">—</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="dur" id="durGrid">
+        <button data-min="5">5</button>
+        <button data-min="10">10</button>
+        <button data-min="15">15</button>
+        <button data-min="20">20</button>
+        <button data-min="30">30</button>
+        <button data-min="60">60</button>
+      </div>
+      <button class="stop" id="stopBtn" disabled>إيقاف</button>
+    </div>
+
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+// ============================================================
+// CONFIG — change only if your Render host changes
+// ============================================================
+var SERVER_HOST = "socket-server-template.onrender.com";
+var WS_URL      = "wss://" + SERVER_HOST + "/";
+var LOG_URL     = "https://" + SERVER_HOST + "/log";
+var ACK_TIMEOUT = 8000;
+var TICK        = 100;
+var RECONNECT   = 2500;
+
+// ============================================================
+// LocalStorage keys
+// ============================================================
+var LS = {
+  device:  "yonova.device",
+  tag:     "yonova.tag",
+  session: "yonova.session",
+  lang:    "yonova.lang",
+  theme:   "yonova.theme"
+};
+
+// ============================================================
+// State
+// ============================================================
+var S = {
+  lang:    localStorage.getItem(LS.lang) || "ar",
+  ws:      null,
+  wsReady: false,
+  device:  "",
+  tag:     "",
+  online:  false,
+  session: null,       // { endMs, durationMin, tag }
+  sending: false,
+  busy:    false,
+  lastSendAt: 0,
+  beeped:  false,
+  tickTimer: null,
+  verifyTimer: null
+};
+
+// ============================================================
+// i18n
+// ============================================================
+var L = {
+  ar: {
+    appTitle:"Yonova Relay", loginHint:"تسجيل الدخول",
+    lblDev:"اسم الجهاز (ID)", lblTag:"رقم التاج",
+    loginBtn:"دخول", logoutBtn:"خروج",
+    loginEmpty:"املأ كل الحقول",
+    loginWrong:"❌ الجهاز غير متصل أو البيانات خطأ",
+    loginOK:"✅ تم التحقق",
+    wsConnecting:"جاري الاتصال…", wsOn:"متصل", wsOff:"غير متصل",
+    devOk:"الجهاز متصل", devDown:"الجهاز غير متصل",
+    motOn:"المحرك يعمل", motOff:"المحرك متوقف",
+    sIdle:"جاهز", sSend:"📤 إرسال الأمر…", sRun:"🟢 المحرك يعمل",
+    sErr:"⚠️ فشل الإرسال", sKick:"⚠️ تم التحكم من جهاز آخر",
+    noSession:"لا توجد جلسة", startedBy:"بدأها", minLabel:"دقيقة",
+    stopBtn:"إيقاف", offlineText:"⚠️ الجهاز غير متصل بالإنترنت",
+    confirmStop:"إيقاف الآن؟", timeEnded:"انتهت المدة", wantLogout:"خروج؟"
+  },
+  en: {
+    appTitle:"Yonova Relay", loginHint:"Sign in",
+    lblDev:"Device ID", lblTag:"Tag number",
+    loginBtn:"Login", logoutBtn:"Logout",
+    loginEmpty:"Please fill all fields",
+    loginWrong:"❌ Device offline or wrong credentials",
+    loginOK:"✅ Verified",
+    wsConnecting:"Connecting…", wsOn:"Online", wsOff:"Offline",
+    devOk:"Device online", devDown:"Device offline",
+    motOn:"Motor ON", motOff:"Motor OFF",
+    sIdle:"Ready", sSend:"📤 Sending…", sRun:"🟢 Motor running",
+    sErr:"⚠️ Send failed", sKick:"⚠️ Taken over by another client",
+    noSession:"No session", startedBy:"started by", minLabel:"min",
+    stopBtn:"Stop", offlineText:"⚠️ Device not connected",
+    confirmStop:"Stop now?", timeEnded:"Time is up", wantLogout:"Log out?"
+  }
+};
+function t(k){ return L[S.lang][k] || k; }
+
+// ============================================================
+// DOM
+// ============================================================
+var $ = function(id){ return document.getElementById(id); };
+function setText(el,v){ if (el && el.textContent !== v) el.textContent = v; }
+function setCls (el,c){ if (el && el.className   !== c) el.className   = c; }
+function setHid (el,h){ el && el.classList.toggle("hidden", !!h); }
+function pad(n){ return n < 10 ? "0"+n : ""+n; }
+
+// ============================================================
+// Language / theme
+// ============================================================
+function applyLang(){
+  var h = document.documentElement;
+  h.lang = S.lang; h.dir = S.lang === "ar" ? "rtl" : "ltr";
+  setText($("appTitle"), t("appTitle"));
+  setText($("loginHint"), t("loginHint"));
+  setText($("lblDev"), t("lblDev"));
+  setText($("lblTag"), t("lblTag"));
+  setText($("loginBtn"), t("loginBtn"));
+  setText($("stopBtn"), t("stopBtn"));
+  setText($("offlineText"), t("offlineText"));
+  setText($("langBtn"), S.lang === "ar" ? "EN" : "ع");
+  setText($("logoutBtn"), t("logoutBtn"));
+  render();
+}
+$("langBtn").onclick = function(){
+  S.lang = S.lang === "ar" ? "en" : "ar";
+  localStorage.setItem(LS.lang, S.lang);
+  applyLang();
+};
+(function(){
+  var saved = localStorage.getItem(LS.theme);
+  if (saved) document.documentElement.style.colorScheme = saved;
+  setText($("themeBtn"),
+    document.documentElement.style.colorScheme === "dark" ? "☀️" : "🌙");
+})();
+$("themeBtn").onclick = function(){
+  var cur = document.documentElement.style.colorScheme ||
+    (matchMedia("(prefers-color-scheme:dark)").matches ? "dark" : "light");
+  var next = cur === "dark" ? "light" : "dark";
+  document.documentElement.style.colorScheme = next;
+  localStorage.setItem(LS.theme, next);
+  setText($("themeBtn"), next === "dark" ? "☀️" : "🌙");
+};
+
+// ============================================================
+// WebSocket
+// ============================================================
+function wsSet(state, text){
+  var cls = state === "ok" ? "pill-ok" :
+            state === "err" ? "pill-bad" :
+            state === "wait" ? "pill-warn" : "pill-off";
+  setCls($("pWs"), "pill " + cls);   setText($("tWs"), text);
+  setCls($("wsPill"), "pill " + cls); setText($("wsText"), text);
+}
+
+function connectWS(){
+  if (S.ws && (S.ws.readyState === WebSocket.OPEN ||
+               S.ws.readyState === WebSocket.CONNECTING)) return;
+
+  wsSet("wait", t("wsConnecting"));
+  var ws;
+  try { ws = new WebSocket(WS_URL); }
+  catch(e){ return setTimeout(connectWS, RECONNECT); }
+  S.ws = ws;
+
+  ws.onopen = function(){
+    S.wsReady = true;
+    wsSet("ok", t("wsOn"));
+    // If we have saved credentials and no session yet, auto-verify
+    if (S.device && !S.session) verifyLogin();
+    else if (S.device) enterMain();   // we already have a session stored
+  };
+  ws.onclose = function(){
+    S.wsReady = false;
+    wsSet("off", t("wsOff"));
+    setTimeout(connectWS, RECONNECT);
+  };
+  ws.onerror = function(){ wsSet("err", "⚠"); };
+  ws.onmessage = onWsMessage;
+}
+
+function sendJson(obj){
+  if (!S.wsReady) return false;
+  try { S.ws.send(JSON.stringify(obj)); return true; }
+  catch(e){ return false; }
+}
+
+// ============================================================
+// Incoming
+// ============================================================
+function onWsMessage(ev){
+  var raw = ev.data;
+  var msg = null;
+  if (typeof raw === "string" && raw[0] === "{"){
+    try { msg = JSON.parse(raw); } catch(_){}
+  }
+
+  if (msg){
+    // ---- verify reply ----
+    if (msg.type === "check_results" && msg.results){
+      var r = msg.results[0];
+      if (r && r.online && r.auth){
+        S.online = true;
+        setText($("loginMsg"), t("loginOK"));
+        clearTimeout(S.verifyTimer);
+        enterMain();
+      } else {
+        S.online = false;
+        setText($("loginMsg"), t("loginWrong"));
+        $("loginBtn").classList.remove("loading");
+        $("loginBtn").disabled = false;
+      }
+      render();
+      return;
+    }
+    if (msg.type === "error"){
+      S.sending = false; render();
+      return;
+    }
+    if (msg.type === "disconnect"){
+      handleKicked();
+      return;
+    }
+    return;
+  }
+
+  // ---- raw ESP reply ----
+  if (typeof raw === "string" && raw.length){
+    S.sending = false; render();
+  }
+}
+
+// ============================================================
+// Login
+// ============================================================
+function verifyLogin(){
+  if (!S.wsReady || !S.device) return;
+  sendJson({
+    type: "check_esps",
+    devices: [{ id: S.device, password: "" }]
+  });
+}
+
+$("loginBtn").onclick = function(){
+  var dev = $("devInput").value.trim().toUpperCase();
+  var tag = $("tagInput").value.trim();
+  if (!dev || !tag){ setText($("loginMsg"), t("loginEmpty")); return; }
+
+  S.device = dev; S.tag = tag;
+  localStorage.setItem(LS.device, dev);
+  localStorage.setItem(LS.tag, tag);
+
+  setText($("loginMsg"), "");
+  $("loginBtn").classList.add("loading");
+  $("loginBtn").disabled = true;
+
+  if (!S.wsReady){ connectWS(); }
+  verifyLogin();
+
+  // Timeout fallback so the button never hangs
+  clearTimeout(S.verifyTimer);
+  S.verifyTimer = setTimeout(function(){
+    if ($("loginBtn").disabled){
+      $("loginBtn").classList.remove("loading");
+      $("loginBtn").disabled = false;
+      setText($("loginMsg"), t("loginWrong"));
+    }
+  }, 9000);
+};
+
+// ============================================================
+// Main view
+// ============================================================
+function enterMain(){
+  $("loginBtn").classList.remove("loading");
+  $("loginBtn").disabled = false;
+  setHid($("loginCard"), true);
+  setHid($("mainView"), false);
+  setHid($("logoutBtn"), false);
+  setText($("info"), t("startedBy") + " " + S.tag + " · " + S.device);
+
+  // Restore saved session (survives reload / phone lock)
+  var saved = localStorage.getItem(LS.session);
+  if (saved){
+    try{
+      var s = JSON.parse(saved);
+      if (s && s.device === S.device && s.endMs > Date.now()){
+        S.session = s;
+        // Make sure ESP is actually ON (in case we lost power mid-session)
+        sendCommand("m1r_on", true);
+      } else {
+        localStorage.removeItem(LS.session);
+      }
+    } catch(_){ localStorage.removeItem(LS.session); }
+  }
+
+  if (!S.tickTimer) S.tickTimer = setInterval(tick, TICK);
+  render();
+}
+
+$("logoutBtn").onclick = function(){
+  if (!confirm(t("wantLogout"))) return;
+  localStorage.removeItem(LS.device);
+  localStorage.removeItem(LS.tag);
+  localStorage.removeItem(LS.session);
+  location.reload();
+};
+
+// ============================================================
+// Commands
+// ============================================================
+function sendCommand(message, silent){
+  if (!S.wsReady) return false;
+  var ok = sendJson({
+    type: "command",
+    targetId: S.device,
+    password: "",
+    message: message
+  });
+  if (ok) S.lastSendAt = Date.now();
+  return ok;
+}
+
+function logToServer(device, tag, action, duration){
+  // fire & forget — never block the UI
+  try{
+    fetch(LOG_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device, tag, action, duration })
+    }).catch(function(){});
+  }catch(_){}
+}
+
+// ============================================================
+// Start
+// ============================================================
+function startSession(min, btn){
+  if (S.busy) return;
+  S.busy = true;
+  S.sending = true;
+  if (btn) btn.classList.add("loading");
+  render();
+
+  if (!sendCommand("m1r_on")){
+    S.busy = false; S.sending = false;
+    if (btn) btn.classList.remove("loading");
+    setCls($("stage"), "stage s-err");
+    setText($("stageText"), t("sErr"));
+    render();
+    return;
+  }
+
+  // Start countdown immediately — ESP ack will confirm
+  var now = Date.now();
+  S.session = {
+    device: S.device,
+    tag: S.tag,
+    durationMin: min,
+    startMs: now,
+    endMs: now + min * 60000
+  };
+  localStorage.setItem(LS.session, JSON.stringify(S.session));
+  S.beeped = false;
+
+  logToServer(S.device, S.tag, "start", min);
+
+  S.busy = false;
+  setTimeout(function(){
+    if (S.sending) S.sending = false;   // ack didn't arrive, but session runs
+    if (btn) btn.classList.remove("loading");
+    render();
+  }, 400);
+
+  render();
+}
+
+// ============================================================
+// Stop
+// ============================================================
+function stopSession(auto){
+  if (!S.session) return;
+  if (!auto && !confirm(t("confirmStop"))) return;
+  var dur = S.session.durationMin;
+  sendCommand("m1r_off");
+  logToServer(S.device, S.tag, auto ? "expire" : "stop", dur);
+  S.session = null;
+  localStorage.removeItem(LS.session);
+  S.beeped = false;
+  S.busy = false;
+  render();
+}
+
+// Wire duration buttons
+var durBtns = $("durGrid").querySelectorAll("button");
+for (var i=0;i<durBtns.length;i++){
+  (function(b){
+    b.onclick = function(){ startSession(Number(b.dataset.min), b); };
+  })(durBtns[i]);
+}
+$("stopBtn").onclick = function(){ stopSession(false); };
+
+// ============================================================
+// Render
+// ============================================================
+function render(){
+  if (S.wsReady) wsSet("ok", t("wsOn"));
+
+  if (!S.wsReady){ setCls($("pDev"),"pill pill-off"); setText($("tDev"),"—"); }
+  else if (!S.online){ setCls($("pDev"),"pill pill-bad"); setText($("tDev"), t("devDown")); }
+  else { setCls($("pDev"),"pill pill-ok"); setText($("tDev"), t("devOk")); }
+
+  var running = !!(S.session && S.session.endMs > Date.now());
+  setCls($("pMot"), "pill " + (running ? "pill-ok" : "pill-off"));
+  setText($("tMot"), running ? t("motOn") : t("motOff"));
+
+  setHid($("offlineBanner"), !(S.wsReady && !S.online && S.device));
+
+  var stage, cls;
+  if (S.sending){ stage = t("sSend"); cls = "stage s-send"; }
+  else if (running){ stage = t("sRun"); cls = "stage s-run"; }
+  else { stage = t("sIdle"); cls = "stage s-idle"; }
+  setCls($("stage"), cls); setText($("stageText"), stage);
+
+  var cd = $("cd");
+  if (running){
+    cd.className = "cd run";
+  } else {
+    cd.className = "cd idle";
+    setText(cd, "--:--");
+  }
+
+  $("stopBtn").disabled = !(running && S.wsReady && !S.busy);
+
+  for (var i=0;i<durBtns.length;i++){
+    var m = Number(durBtns[i].dataset.min);
+    durBtns[i].classList.toggle("active",
+      running && S.session && m === S.session.durationMin);
+  }
+}
+
+// ============================================================
+// Countdown
+// ============================================================
+function tick(){
+  if (!S.session) return;
+  var left = S.session.endMs - Date.now();
+  var cd = $("cd");
+
+  if (left <= 0){
+    setText(cd, "00:00");
+    cd.className = "cd urgent";
+    if (!S.beeped){
+      S.beeped = true;
+      beep();
+      stopSession(true);
+    }
+    return;
+  }
+  S.beeped = false;
+  var s = Math.floor(left / 1000);
+  var m = Math.floor(s / 60);
+  var ss = s % 60;
+  var display;
+  if (m >= 60){
+    var h = Math.floor(m/60); m = m % 60;
+    display = pad(h) + ":" + pad(m) + ":" + pad(ss);
+  } else {
+    display = pad(m) + ":" + pad(ss);
+  }
+  setText(cd, display);
+  cd.className = "cd " + (left < 30000 ? "urgent" : "run");
+}
+
+// ============================================================
+// Kicked
+// ============================================================
+function handleKicked(){
+  S.session = null;
+  localStorage.removeItem(LS.session);
+  setCls($("stage"), "stage s-err");
+  setText($("stageText"), t("sKick"));
+  render();
+}
+
+// ============================================================
+// Beep
+// ============================================================
+function beep(){
+  try{
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine"; o.frequency.value = 880;
+    o.connect(g); g.connect(ctx.destination);
+    g.gain.value = 0.15; o.start();
+    setTimeout(function(){ o.stop(); ctx.close(); }, 400);
+  }catch(_){}
+}
+
+// ============================================================
+// Visibility — re-verify on return
+// ============================================================
+document.addEventListener("visibilitychange", function(){
+  if (!document.hidden && S.device && S.wsReady && !S.session) verifyLogin();
+});
+
+// ============================================================
+// Boot
+// ============================================================
+(function boot(){
+  S.device = (localStorage.getItem(LS.device) || "").toUpperCase();
+  S.tag    = localStorage.getItem(LS.tag) || "";
+  $("devInput").value = S.device;
+  $("tagInput").value = S.tag;
+
+  applyLang();
+  connectWS();
+
+  // Auto-login if we have credentials and a session or want to verify
+  if (S.device){
+    $("loginBtn").classList.add("loading");
+    $("loginBtn").disabled = true;
+    // ws.onopen will call verifyLogin or enterMain
+  }
+})();
+
+})();
+</script>
+</body>
+</html>

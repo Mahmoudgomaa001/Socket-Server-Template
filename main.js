@@ -5,6 +5,10 @@ const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// -------- Middleware --------
+app.use(express.json({ limit: "32kb" }));
+app.use(express.static("public"));   // serves public/index.html at "/"
+
 // -------- Serve firmware file --------
 app.get("/firmware.bin", async (req, res) => {
   const githubUrl =
@@ -22,6 +26,36 @@ app.get("/firmware.bin", async (req, res) => {
     console.error("❌ Firmware fetch error:", err.message);
     res.status(500).send("Firmware fetch failed");
   }
+});
+
+// ============================================================
+// Simple in-memory usage log (last 1000 entries)
+// Lost on restart — fine for now, swap for DB later if needed.
+// ============================================================
+const usageLog = [];   // newest first
+
+app.post("/log", (req, res) => {
+  const { device, tag, action, duration } = req.body || {};
+  if (!device || !action) {
+    return res.status(400).json({ ok: false, error: "device & action required" });
+  }
+  usageLog.unshift({
+    ts: new Date().toISOString(),
+    device: String(device).toUpperCase().slice(0, 32),
+    tag: String(tag || "").slice(0, 32),
+    action: String(action).slice(0, 16),
+    duration: Number(duration) || 0
+  });
+  if (usageLog.length > 1000) usageLog.length = 1000;
+  res.json({ ok: true });
+});
+
+app.get("/log", (req, res) => {
+  const device = String(req.query.device || "").toUpperCase();
+  const limit  = Math.min(200, Math.max(1, Number(req.query.limit) || 20));
+  const rows = (device ? usageLog.filter(r => r.device === device) : usageLog)
+    .slice(0, limit);
+  res.json({ ok: true, rows });
 });
 
 // -------- HTTP Server --------
