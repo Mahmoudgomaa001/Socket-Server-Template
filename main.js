@@ -30,7 +30,6 @@ app.get("/firmware.bin", async (req, res) => {
 
 // ============================================================
 // Simple in-memory usage log (last 1000 entries)
-// Lost on restart — fine for now, swap for DB later if needed.
 // ============================================================
 const usageLog = [];   // newest first
 

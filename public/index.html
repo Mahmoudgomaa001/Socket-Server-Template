@@ -155,12 +155,12 @@ button.loading::after{content:"";position:absolute;left:50%;top:50%;width:18px;h
 "use strict";
 
 // ============================================================
-// CONFIG — change only if your Render host changes
+// CONFIG
 // ============================================================
 var SERVER_HOST = "socket-server-template.onrender.com";
 var WS_URL      = "wss://" + SERVER_HOST + "/";
 var LOG_URL     = "https://" + SERVER_HOST + "/log";
-var ACK_TIMEOUT = 8000;
+var DEFAULT_PASS = "11110000";   // matches the ESP's resetSettings() default
 var TICK        = 100;
 var RECONNECT   = 2500;
 
@@ -185,7 +185,7 @@ var S = {
   device:  "",
   tag:     "",
   online:  false,
-  session: null,       // { endMs, durationMin, tag }
+  session: null,
   sending: false,
   busy:    false,
   lastSendAt: 0,
@@ -234,7 +234,7 @@ var L = {
 function t(k){ return L[S.lang][k] || k; }
 
 // ============================================================
-// DOM
+// DOM helpers
 // ============================================================
 var $ = function(id){ return document.getElementById(id); };
 function setText(el,v){ if (el && el.textContent !== v) el.textContent = v; }
@@ -303,9 +303,8 @@ function connectWS(){
   ws.onopen = function(){
     S.wsReady = true;
     wsSet("ok", t("wsOn"));
-    // If we have saved credentials and no session yet, auto-verify
     if (S.device && !S.session) verifyLogin();
-    else if (S.device) enterMain();   // we already have a session stored
+    else if (S.device) enterMain();
   };
   ws.onclose = function(){
     S.wsReady = false;
@@ -323,7 +322,7 @@ function sendJson(obj){
 }
 
 // ============================================================
-// Incoming
+// Incoming messages
 // ============================================================
 function onWsMessage(ev){
   var raw = ev.data;
@@ -333,7 +332,6 @@ function onWsMessage(ev){
   }
 
   if (msg){
-    // ---- verify reply ----
     if (msg.type === "check_results" && msg.results){
       var r = msg.results[0];
       if (r && r.online && r.auth){
@@ -361,7 +359,6 @@ function onWsMessage(ev){
     return;
   }
 
-  // ---- raw ESP reply ----
   if (typeof raw === "string" && raw.length){
     S.sending = false; render();
   }
@@ -374,7 +371,7 @@ function verifyLogin(){
   if (!S.wsReady || !S.device) return;
   sendJson({
     type: "check_esps",
-    devices: [{ id: S.device, password: "" }]
+    devices: [{ id: S.device, password: DEFAULT_PASS }]
   });
 }
 
@@ -394,7 +391,6 @@ $("loginBtn").onclick = function(){
   if (!S.wsReady){ connectWS(); }
   verifyLogin();
 
-  // Timeout fallback so the button never hangs
   clearTimeout(S.verifyTimer);
   S.verifyTimer = setTimeout(function(){
     if ($("loginBtn").disabled){
@@ -406,7 +402,7 @@ $("loginBtn").onclick = function(){
 };
 
 // ============================================================
-// Main view
+// Enter main
 // ============================================================
 function enterMain(){
   $("loginBtn").classList.remove("loading");
@@ -416,19 +412,20 @@ function enterMain(){
   setHid($("logoutBtn"), false);
   setText($("info"), t("startedBy") + " " + S.tag + " · " + S.device);
 
-  // Restore saved session (survives reload / phone lock)
   var saved = localStorage.getItem(LS.session);
   if (saved){
     try{
       var s = JSON.parse(saved);
       if (s && s.device === S.device && s.endMs > Date.now()){
         S.session = s;
-        // Make sure ESP is actually ON (in case we lost power mid-session)
-        sendCommand("m1r_on", true);
+        sendCommand("m1r_on", true);   // safety re-arm
       } else {
         localStorage.removeItem(LS.session);
+        sendCommand("m1r_off", true);  // session expired while away — make sure relay is off
       }
-    } catch(_){ localStorage.removeItem(LS.session); }
+    } catch(_){
+      localStorage.removeItem(LS.session);
+    }
   }
 
   if (!S.tickTimer) S.tickTimer = setInterval(tick, TICK);
@@ -451,7 +448,7 @@ function sendCommand(message, silent){
   var ok = sendJson({
     type: "command",
     targetId: S.device,
-    password: "",
+    password: DEFAULT_PASS,
     message: message
   });
   if (ok) S.lastSendAt = Date.now();
@@ -459,7 +456,6 @@ function sendCommand(message, silent){
 }
 
 function logToServer(device, tag, action, duration){
-  // fire & forget — never block the UI
   try{
     fetch(LOG_URL, {
       method: "POST",
@@ -488,7 +484,6 @@ function startSession(min, btn){
     return;
   }
 
-  // Start countdown immediately — ESP ack will confirm
   var now = Date.now();
   S.session = {
     device: S.device,
@@ -504,7 +499,7 @@ function startSession(min, btn){
 
   S.busy = false;
   setTimeout(function(){
-    if (S.sending) S.sending = false;   // ack didn't arrive, but session runs
+    if (S.sending) S.sending = false;
     if (btn) btn.classList.remove("loading");
     render();
   }, 400);
@@ -610,7 +605,7 @@ function tick(){
 }
 
 // ============================================================
-// Kicked
+// Kicked by another client
 // ============================================================
 function handleKicked(){
   S.session = null;
@@ -635,7 +630,7 @@ function beep(){
 }
 
 // ============================================================
-// Visibility — re-verify on return
+// Visibility — re-verify on return if idle
 // ============================================================
 document.addEventListener("visibilitychange", function(){
   if (!document.hidden && S.device && S.wsReady && !S.session) verifyLogin();
@@ -653,11 +648,10 @@ document.addEventListener("visibilitychange", function(){
   applyLang();
   connectWS();
 
-  // Auto-login if we have credentials and a session or want to verify
   if (S.device){
     $("loginBtn").classList.add("loading");
     $("loginBtn").disabled = true;
-    // ws.onopen will call verifyLogin or enterMain
+    // ws.onopen will call verifyLogin() or enterMain()
   }
 })();
 
