@@ -68,20 +68,25 @@ const wss = new WebSocket.Server({
   skipUTF8Validation: true,
 });
 
-const clients = new Map();             // espId -> ws  (ESP sockets)
+const clients = new Map();             // espId -> ws
 const passwords = new Map();           // espId -> password
 const awaitingResponses = new Map();   // commandId -> Set<ws>
 const lastUsedEspByClient = new Map(); // ws -> espId
-const lastSeen = new Map();            // ws -> timestamp (last message)
+const lastSeen = new Map();            // ws -> timestamp of last message
+const recentTimeouts = new Map();      // espId -> array of timestamps
 
 // ============ Live sync state ============
-const sessions = new Map();  // espId -> { running, endTimeUTC, startedBy, durationMin }
-const viewers  = new Map();  // espId -> Set<ws>
+const sessions = new Map();
+const viewers  = new Map();
 
 // ============ Timing constants ============
-const PING_WATCHDOG_MS  = 120000;      // ESP considered dead after 120s silence
-const WATCHDOG_TICK_MS  = 30000;       // check every 30s
-const COMMAND_TIMEOUT_MS = 10000;      // reply must arrive within 10s
+const PING_WATCHDOG_MS   = 300000;   // 5 min — old ESPs ping every 60s → 5x margin
+const WATCHDOG_TICK_MS   = 30000;
+const COMMAND_TIMEOUT_MS = 15000;    // 15s — generous for slow reconnects
+const TIMEOUT_WINDOW_MS  = 60000;    // timeouts counted within 1 min
+const TIMEOUT_KILL_COUNT = 3;        // 3 timeouts in 1 min → force-reconnect ESP
+
+const commandTimeouts = new Map();   // commandId -> Timeout handle
 
 function broadcastSession(espId, kind, extra) {
   const set = viewers.get(espId);
@@ -106,10 +111,11 @@ function safeSend(ws, message) {
   }
 }
 
-// -------- Command timeout helper --------
-function armCommandTimeout(commandId) {
+// -------- Command timeout management --------
+function armCommandTimeout(commandId, espId) {
   const old = commandTimeouts.get(commandId);
   if (old) clearTimeout(old);
+
   const t = setTimeout(() => {
     const waiters = awaitingResponses.get(commandId);
     if (waiters) {
@@ -121,11 +127,32 @@ function armCommandTimeout(commandId) {
     }
     awaitingResponses.delete(commandId);
     commandTimeouts.delete(commandId);
-    console.warn(`⏱️ Command timeout: ${commandId}`);
+
+    // Track per-ESP timeouts — if too many in a short window, force-reconnect.
+    if (espId) {
+      const now = Date.now();
+      let arr = recentTimeouts.get(espId) || [];
+      arr = arr.filter(t => now - t < TIMEOUT_WINDOW_MS);
+      arr.push(now);
+      recentTimeouts.set(espId, arr);
+
+      if (arr.length >= TIMEOUT_KILL_COUNT) {
+        const sock = clients.get(espId);
+        if (sock) {
+          console.warn(`💥 ${espId} timed out ${arr.length}x in 60s — forcing reconnect`);
+          try { sock.terminate(); } catch {}
+          clients.delete(espId);
+          passwords.delete(espId);
+          lastSeen.delete(sock);
+        }
+        recentTimeouts.delete(espId);
+      }
+    }
+    console.warn(`⏱️ Command timeout: ${commandId} (esp=${espId || "?"})`);
   }, COMMAND_TIMEOUT_MS);
+
   commandTimeouts.set(commandId, t);
 }
-const commandTimeouts = new Map();      // commandId -> Timeout handle
 
 function clearCommandTimeout(commandId) {
   const t = commandTimeouts.get(commandId);
@@ -142,16 +169,14 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("message", (data, isBinary) => {
-    // Any message from this socket refreshes its liveness.
     lastSeen.set(ws, Date.now());
-
-    let text;
 
     if (isBinary) {
       console.warn("⚠️ Ignored binary message");
       return;
     }
 
+    let text;
     try {
       text = data.toString("utf8");
     } catch (e) {
@@ -164,14 +189,18 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    // ---- RAW ESP (::) — no logging clutter for normal tags stream ----
+    // ---- RAW ESP (::) ----
     if (text.includes("::")) {
       const i = text.indexOf("::");
       const commandId = text.substring(0, i);
       const payload = text.substring(i + 2);
 
-      // Clear any pending timeout for this command id.
       clearCommandTimeout(commandId);
+
+      // Only log short replies; suppress tag-stream noise.
+      if (payload.length < 200 && !payload.includes("\"tags\"") && !payload.includes("\"cloneTags\"")) {
+        console.log(`📨 ${commandId}::${payload.length > 120 ? payload.substring(0, 120) + "…" : payload}`);
+      }
 
       // ESP auto-stopped itself
       if (commandId === "auto_off") {
@@ -196,6 +225,7 @@ wss.on("connection", (ws) => {
     }
 
     // ---- JSON ----
+    console.log("📨 Incoming:", text);   // only JSON logged — small, useful
     let msg;
     try {
       msg = JSON.parse(text);
@@ -205,10 +235,7 @@ wss.on("connection", (ws) => {
     }
 
     switch (msg.type) {
-      // ---- ESP registration ----
       case "register_esp": {
-        // If this ESP was already registered on a different (dead) socket,
-        // remove the old one so we don't hold onto zombies.
         const oldSock = clients.get(msg.id);
         if (oldSock && oldSock !== ws) {
           try { oldSock.terminate(); } catch {}
@@ -217,18 +244,15 @@ wss.on("connection", (ws) => {
         }
         clients.set(msg.id, ws);
         passwords.set(msg.id, msg.password);
+        recentTimeouts.delete(msg.id);
         console.log(`📡 Registered ESP: ${msg.id}`);
         break;
       }
 
-      // ---- Heartbeat (NEW: reply with pong) ----
-      // Old ESPs send {"type":"ping"} every 60s. Old servers replied nothing.
-      // New server replies {"type":"pong"} — old ESPs ignore unknown types.
       case "ping":
         safeSend(ws, JSON.stringify({ type: "pong" }));
         break;
 
-      // ---- Legacy login check ----
       case "check_esps": {
         const results = msg.devices.map((d) => ({
           id: d.id,
@@ -239,7 +263,6 @@ wss.on("connection", (ws) => {
         break;
       }
 
-      // ---- Legacy raw command ----
       case "command": {
         const target = clients.get(msg.targetId);
         const pass = passwords.get(msg.targetId);
@@ -267,7 +290,6 @@ wss.on("connection", (ws) => {
         }
         lastUsedEspByClient.set(ws, msg.targetId);
 
-        // Detach this ws from any previous pending command
         for (const [id, set] of awaitingResponses.entries()) {
           if (set.has(ws)) {
             set.delete(ws);
@@ -275,7 +297,7 @@ wss.on("connection", (ws) => {
           }
         }
         awaitingResponses.set(commandId, new Set([ws]));
-        armCommandTimeout(commandId);      // NEW: auto-fail if no reply in 10s
+        armCommandTimeout(commandId, msg.targetId);
 
         target.send(JSON.stringify({
           type: "command",
@@ -283,11 +305,10 @@ wss.on("connection", (ws) => {
           message: msg.message
         }));
 
-        console.log(`📤 Command sent to ESP ${msg.targetId} (${commandId})`);
+        console.log(`📤 Command → ${msg.targetId} (${commandId}): ${msg.message}`);
         break;
       }
 
-      // ---- Browser subscribes to live state for an ESP ----
       case "watch_esp": {
         const espId = String(msg.espId || "").toUpperCase();
         if (!espId) return;
@@ -304,7 +325,6 @@ wss.on("connection", (ws) => {
         break;
       }
 
-      // ---- Start a session ----
       case "session_start": {
         const espId = String(msg.espId || "").toUpperCase();
         const minutes = Math.max(1, Math.min(600, Number(msg.minutes) || 0));
@@ -353,7 +373,6 @@ wss.on("connection", (ws) => {
         break;
       }
 
-      // ---- Stop a session manually ----
       case "session_stop": {
         const espId = String(msg.espId || "").toUpperCase();
         const tag = String(msg.tag || "").slice(0, 32);
@@ -383,46 +402,38 @@ wss.on("connection", (ws) => {
     }
   });
 
-  // -------- CLOSE --------
   ws.on("close", (code) => {
     console.warn(`⚠️ Closed (code ${code})`);
 
     if (code === 1007) {
-      console.warn("⚠️ Ignored UTF-8 closure (ESP kept logically connected)");
+      console.warn("⚠️ Ignored UTF-8 closure");
       return;
     }
 
     console.log("🔌 Client disconnected");
 
-    // Remove ESP registration — only if this ws is still the registered one.
-    // (Prevents a stale socket close from un-registering a live ESP.)
     for (const [id, client] of clients.entries()) {
       if (client === ws) {
         clients.delete(id);
         passwords.delete(id);
+        recentTimeouts.delete(id);
         console.log(`📴 ESP disconnected: ${id}`);
         break;
       }
     }
 
-    // Clear every pending command timeout that was waiting on this ws
     for (const [cmd, set] of awaitingResponses.entries()) {
       if (set.has(ws)) {
         set.delete(ws);
-        if (!set.size) {
-          awaitingResponses.delete(cmd);
-          clearCommandTimeout(cmd);
-        }
+        if (!set.size) { awaitingResponses.delete(cmd); clearCommandTimeout(cmd); }
       }
     }
 
-    // Remove from viewers
     for (const [espId, set] of viewers.entries()) {
       set.delete(ws);
       if (!set.size) viewers.delete(espId);
     }
 
-    // Legacy "switch ESP" cleanup
     const lastEsp = lastUsedEspByClient.get(ws);
     if (lastEsp) {
       const esp = clients.get(lastEsp);
@@ -440,13 +451,13 @@ wss.on("connection", (ws) => {
 });
 
 // ============================================================
-// Zombie watchdog — removes ESPs that stop sending messages
+// Zombie watchdog
 // ============================================================
 setInterval(() => {
   const now = Date.now();
   for (const [id, sock] of clients.entries()) {
     const seen = lastSeen.get(sock);
-    if (seen === undefined) continue;   // never seen — leave alone for now
+    if (seen === undefined) continue;
     const age = now - seen;
     if (age > PING_WATCHDOG_MS) {
       console.warn(`💀 Zombie removed: ${id} (silent ${Math.round(age/1000)}s)`);
@@ -454,6 +465,7 @@ setInterval(() => {
       clients.delete(id);
       passwords.delete(id);
       lastSeen.delete(sock);
+      recentTimeouts.delete(id);
     }
   }
 }, WATCHDOG_TICK_MS);
