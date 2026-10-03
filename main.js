@@ -5,39 +5,37 @@ const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// -------- Middleware --------
+// QUIET=1 in env silences routine connect/disconnect churn.
+// Commands and errors are ALWAYS logged.
+const QUIET = process.env.QUIET === "1";
+function log(...a)  { if (!QUIET) console.log(...a); }
+function warn(...a) { console.warn(...a); }
+
 app.use(express.json({ limit: "32kb" }));
 app.use(express.static("public"));
 
-// -------- Serve firmware file --------
+// -------- Firmware file --------
 app.get("/firmware.bin", async (req, res) => {
-  const githubUrl =
-    "https://raw.githubusercontent.com/Mahmoudgomaa001/yono_qr_update/main/firmware.bin";
+  const url = "https://raw.githubusercontent.com/Mahmoudgomaa001/yono_qr_update/main/firmware.bin";
   try {
-    const response = await fetch(githubUrl);
-    if (!response.ok) throw new Error("Failed to fetch from GitHub");
-
-    const buffer = await response.buffer();
+    const r = await fetch(url);
+    if (!r.ok) throw new Error("GitHub fetch failed");
+    const buf = await r.buffer();
     res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader("Content-Length", buffer.length);
+    res.setHeader("Content-Length", buf.length);
     res.setHeader("Connection", "close");
-    res.send(buffer);
-  } catch (err) {
-    console.error("❌ Firmware fetch error:", err.message);
+    res.send(buf);
+  } catch (e) {
+    warn("❌ Firmware fetch:", e.message);
     res.status(500).send("Firmware fetch failed");
   }
 });
 
-// ============================================================
-// Usage log (in-memory, last 1000 entries)
-// ============================================================
+// -------- Usage log --------
 const usageLog = [];
-
 app.post("/log", (req, res) => {
   const { device, tag, action, duration } = req.body || {};
-  if (!device || !action) {
-    return res.status(400).json({ ok: false, error: "device & action required" });
-  }
+  if (!device || !action) return res.status(400).json({ ok: false });
   usageLog.unshift({
     ts: new Date().toISOString(),
     device: String(device).toUpperCase().slice(0, 32),
@@ -48,98 +46,103 @@ app.post("/log", (req, res) => {
   if (usageLog.length > 1000) usageLog.length = 1000;
   res.json({ ok: true });
 });
-
 app.get("/log", (req, res) => {
   const device = String(req.query.device || "").toUpperCase();
   const limit  = Math.min(200, Math.max(1, Number(req.query.limit) || 20));
-  const rows = (device ? usageLog.filter(r => r.device === device) : usageLog)
-    .slice(0, limit);
+  const rows = (device ? usageLog.filter(r => r.device === device) : usageLog).slice(0, limit);
   res.json({ ok: true, rows });
 });
 
-// -------- HTTP Server --------
-const server = app.listen(PORT, () => {
-  console.log("✅ HTTP server running on port", PORT);
+// -------- Health snapshot --------
+app.get("/health", (req, res) => {
+  const now = Date.now();
+  const rows = [];
+  for (const [id, ws] of clients.entries()) {
+    const seenAt = lastSeen.get(ws) || 0;
+    const ageSec = Math.round((now - seenAt) / 1000);
+    rows.push({
+      id,
+      online: ws.readyState === WebSocket.OPEN,
+      lastSeenSec: ageSec,
+      healthy: ws.readyState === WebSocket.OPEN && ageSec < 45,
+      timeouts: (recentTimeouts.get(id) || []).length,
+      session: sessions.get(id) || null,
+      outboundBuffer: ws.bufferedAmount || 0
+    });
+  }
+  res.json({ ok: true, espCount: rows.length, rows });
 });
 
-// -------- WebSocket Server --------
-const wss = new WebSocket.Server({
-  server,
-  skipUTF8Validation: true,
-});
+// -------- HTTP --------
+const server = app.listen(PORT, () => console.log("✅ HTTP on", PORT));
 
-const clients = new Map();             // espId -> ws
-const passwords = new Map();           // espId -> password
-const awaitingResponses = new Map();   // commandId -> Set<ws>
-const lastUsedEspByClient = new Map(); // ws -> espId
-const lastSeen = new Map();            // ws -> timestamp of last message
-const recentTimeouts = new Map();      // espId -> array of timestamps
+// -------- WS --------
+const wss = new WebSocket.Server({ server, skipUTF8Validation: true });
 
-// ============ Live sync state ============
-const sessions = new Map();
-const viewers  = new Map();
+const clients           = new Map(); // espId -> ws
+const passwords         = new Map(); // espId -> password
+const awaitingResponses = new Map(); // commandId -> Set<ws>
+const lastSeen          = new Map(); // ws -> timestamp
+const recentTimeouts    = new Map(); // espId -> [timestamps]
 
-// ============ Timing constants ============
-const PING_WATCHDOG_MS   = 300000;   // 5 min — old ESPs ping every 60s → 5x margin
-const WATCHDOG_TICK_MS   = 30000;
-const COMMAND_TIMEOUT_MS = 15000;    // 15s — generous for slow reconnects
-const TIMEOUT_WINDOW_MS  = 60000;    // timeouts counted within 1 min
-const TIMEOUT_KILL_COUNT = 3;        // 3 timeouts in 1 min → force-reconnect ESP
+const sessions = new Map(); // espId -> { running, endTimeUTC, startedBy, durationMin }
+const viewers  = new Map(); // espId -> Set<ws>
 
-const commandTimeouts = new Map();   // commandId -> Timeout handle
+// ---- Timing ----
+const ESP_STALE_MS       = 90000;
+const WATCHDOG_TICK_MS   = 20000;
+const COMMAND_TIMEOUT_MS = 20000;
+const TIMEOUT_WINDOW_MS  = 60000;
+const TIMEOUT_KILL_COUNT = 3;
+
+// ---- Flow-control ----
+// If the browser's outbound buffer exceeds this, the server applies backpressure
+// by delaying the ack sent back to the ESP. The ESP waits for the ack before
+// sending the next tag chunk. This naturally slows the stream to match the
+// pace the browser can absorb. No fixed delay is needed.
+const BROWSER_BACKPRESSURE_LIMIT = 200000; // bytes
+const ACK_MAX_DELAY_MS           = 300;    // cap on the adaptive delay
+const TAG_CHUNK_SKIP_LOG_MS      = 5000;
+
+const commandTimeouts = new Map();
+const lastSkipLog     = new Map(); // espId -> timestamp
 
 function broadcastSession(espId, kind, extra) {
   const set = viewers.get(espId);
   if (!set || !set.size) return;
   const payload = JSON.stringify({
-    type: kind,
-    espId,
+    type: kind, espId,
     session: sessions.get(espId) || null,
     ...(extra || {})
   });
-  set.forEach((c) => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
+  set.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
 }
 
-console.log("✅ WebSocket server started");
-
-// -------- Safe send --------
-function safeSend(ws, message) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(message, (err) => {
-      if (err) console.error("❌ Send failed:", err.message);
-    });
-  }
+function safeSend(ws, msg) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (ws.bufferedAmount > BROWSER_BACKPRESSURE_LIMIT) return;
+  ws.send(msg, err => { if (err) warn("send err:", err.message); });
 }
 
-// -------- Command timeout management --------
 function armCommandTimeout(commandId, espId) {
   const old = commandTimeouts.get(commandId);
   if (old) clearTimeout(old);
-
   const t = setTimeout(() => {
     const waiters = awaitingResponses.get(commandId);
-    if (waiters) {
-      waiters.forEach((c) => {
-        if (c.readyState === WebSocket.OPEN) {
-          c.send(JSON.stringify({ type: "error", message: "timeout" }));
-        }
-      });
-    }
+    if (waiters) waiters.forEach(c => {
+      if (c.readyState === WebSocket.OPEN) c.send(JSON.stringify({ type: "error", message: "timeout" }));
+    });
     awaitingResponses.delete(commandId);
     commandTimeouts.delete(commandId);
-
-    // Track per-ESP timeouts — if too many in a short window, force-reconnect.
     if (espId) {
       const now = Date.now();
-      let arr = recentTimeouts.get(espId) || [];
-      arr = arr.filter(t => now - t < TIMEOUT_WINDOW_MS);
+      let arr = (recentTimeouts.get(espId) || []).filter(x => now - x < TIMEOUT_WINDOW_MS);
       arr.push(now);
       recentTimeouts.set(espId, arr);
-
       if (arr.length >= TIMEOUT_KILL_COUNT) {
         const sock = clients.get(espId);
         if (sock) {
-          console.warn(`💥 ${espId} timed out ${arr.length}x in 60s — forcing reconnect`);
+          warn(`💥 ${espId} timed out ${arr.length}x — forcing reconnect`);
           try { sock.terminate(); } catch {}
           clients.delete(espId);
           passwords.delete(espId);
@@ -148,91 +151,108 @@ function armCommandTimeout(commandId, espId) {
         recentTimeouts.delete(espId);
       }
     }
-    console.warn(`⏱️ Command timeout: ${commandId} (esp=${espId || "?"})`);
+    warn(`⏱️ Command timeout: ${commandId} (esp=${espId || "?"})`);
   }, COMMAND_TIMEOUT_MS);
-
   commandTimeouts.set(commandId, t);
 }
-
-function clearCommandTimeout(commandId) {
-  const t = commandTimeouts.get(commandId);
-  if (t) { clearTimeout(t); commandTimeouts.delete(commandId); }
+function clearCommandTimeout(id) {
+  const t = commandTimeouts.get(id);
+  if (t) { clearTimeout(t); commandTimeouts.delete(id); }
 }
 
-// -------- Connection --------
-wss.on("connection", (ws) => {
-  console.log("🔌 New client connected");
+// Identify which ESP an inbound stream belongs to.
+function espIdForSocket(ws) {
+  for (const [id, s] of clients.entries()) if (s === ws) return id;
+  return null;
+}
+
+// A tag chunk is a stream fragment. Non-tag payloads (settings, replies, etc.)
+// must always forward immediately and never trigger backpressure.
+function isTagChunk(payload) {
+  return payload.startsWith("{\"tags\"") || payload.startsWith("{\"cloneTags\"");
+}
+
+wss.on("connection", ws => {
   lastSeen.set(ws, Date.now());
 
-  ws.on("error", (err) => {
-    console.warn("⚠️ WS error ignored:", err.message);
+  ws.on("error", err => {
+    if (!QUIET) warn("ws err:", err.message);
   });
 
   ws.on("message", (data, isBinary) => {
     lastSeen.set(ws, Date.now());
-
-    if (isBinary) {
-      console.warn("⚠️ Ignored binary message");
-      return;
-    }
+    if (isBinary) return;
 
     let text;
-    try {
-      text = data.toString("utf8");
-    } catch (e) {
-      console.warn("⚠️ Invalid UTF-8 dropped");
-      return;
-    }
+    try { text = data.toString("utf8"); } catch { return; }
+    if (!text || text.length > 5000) return;
 
-    if (!text || text.length > 5000) {
-      console.warn("⚠️ Suspicious message dropped");
-      return;
-    }
-
-    // ---- RAW ESP (::) ----
+    // ---- RAW ESP (commandId::payload) ----
     if (text.includes("::")) {
       const i = text.indexOf("::");
       const commandId = text.substring(0, i);
-      const payload = text.substring(i + 2);
-
+      const payload   = text.substring(i + 2);
       clearCommandTimeout(commandId);
 
-      // Only log short replies; suppress tag-stream noise.
-      if (payload.length < 200 && !payload.includes("\"tags\"") && !payload.includes("\"cloneTags\"")) {
-        console.log(`📨 ${commandId}::${payload.length > 120 ? payload.substring(0, 120) + "…" : payload}`);
-      }
-
-      // ESP auto-stopped itself
       if (commandId === "auto_off") {
         const espId = payload.trim().toUpperCase();
         if (espId && sessions.has(espId)) {
           sessions.delete(espId);
           broadcastSession(espId, "session_end", { reason: "auto" });
-          console.log(`⏱️  auto_off ${espId}`);
+          log(`⏱️ auto_off ${espId}`);
         }
         return;
       }
 
-      // Forward the reply to whoever is waiting on this commandId
-      const responseClients = awaitingResponses.get(commandId);
-      if (responseClients) {
-        responseClients.forEach((client) => {
-          if (client.readyState === WebSocket.OPEN) client.send(payload);
-        });
-        awaitingResponses.delete(commandId);
+      const waiters = awaitingResponses.get(commandId);
+      if (!waiters) return;
+
+      const isTag = isTagChunk(payload);
+
+      // Forward to browser (with backpressure guard for tag chunks).
+      waiters.forEach(client => {
+        if (client.readyState !== WebSocket.OPEN) return;
+        if (isTag && client.bufferedAmount > BROWSER_BACKPRESSURE_LIMIT) {
+          const espId = espIdForSocket(ws) || "?";
+          const now = Date.now();
+          const last = lastSkipLog.get(espId) || 0;
+          if (now - last > TAG_CHUNK_SKIP_LOG_MS) {
+            lastSkipLog.set(espId, now);
+            warn(`🚧 ${espId}: browser buffer full, skipping tag chunk (${client.bufferedAmount}B)`);
+          }
+          return;
+        }
+        client.send(payload);
+      });
+
+      // Adaptive ack — only for tag chunks, only to the ESP.
+      // Old ESPs silently ignore this. New ESPs use it to pace the stream.
+      if (isTag && ws.readyState === WebSocket.OPEN) {
+        const maxBuffered = Array.from(waiters)
+          .reduce((m, c) => Math.max(m, c.bufferedAmount || 0), 0);
+
+        // 0 ms if buffer is empty, up to ACK_MAX_DELAY_MS if it's near the limit.
+        const ackDelay = Math.min(
+          ACK_MAX_DELAY_MS,
+          Math.max(0, Math.floor(maxBuffered / (BROWSER_BACKPRESSURE_LIMIT / ACK_MAX_DELAY_MS)))
+        );
+
+        if (ackDelay === 0) {
+          ws.send(JSON.stringify({ type: "ack", commandId }));
+        } else {
+          setTimeout(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "ack", commandId }));
+            }
+          }, ackDelay);
+        }
       }
       return;
     }
 
     // ---- JSON ----
-    console.log("📨 Incoming:", text);   // only JSON logged — small, useful
     let msg;
-    try {
-      msg = JSON.parse(text);
-    } catch {
-      console.warn("⚠️ Invalid JSON ignored");
-      return;
-    }
+    try { msg = JSON.parse(text); } catch { return; }
 
     switch (msg.type) {
       case "register_esp": {
@@ -240,12 +260,12 @@ wss.on("connection", (ws) => {
         if (oldSock && oldSock !== ws) {
           try { oldSock.terminate(); } catch {}
           lastSeen.delete(oldSock);
-          console.log(`🔁 Replaced old socket for ${msg.id}`);
+          log(`🔁 replaced socket for ${msg.id}`);
         }
         clients.set(msg.id, ws);
         passwords.set(msg.id, msg.password);
         recentTimeouts.delete(msg.id);
-        console.log(`📡 Registered ESP: ${msg.id}`);
+        log(`📡 ESP registered: ${msg.id}`);
         break;
       }
 
@@ -254,7 +274,7 @@ wss.on("connection", (ws) => {
         break;
 
       case "check_esps": {
-        const results = msg.devices.map((d) => ({
+        const results = msg.devices.map(d => ({
           id: d.id,
           online: !!clients.get(d.id),
           auth: passwords.get(d.id) === d.password,
@@ -265,30 +285,11 @@ wss.on("connection", (ws) => {
 
       case "command": {
         const target = clients.get(msg.targetId);
-        const pass = passwords.get(msg.targetId);
-
-        if (!target) {
-          safeSend(ws, JSON.stringify({ type: "error", message: "ESP not online" }));
-          return;
-        }
-        if (pass !== msg.password) {
-          safeSend(ws, JSON.stringify({ type: "error", message: "Wrong password" }));
-          return;
-        }
+        const pass   = passwords.get(msg.targetId);
+        if (!target) return safeSend(ws, JSON.stringify({ type: "error", message: "ESP not online" }));
+        if (pass !== msg.password) return safeSend(ws, JSON.stringify({ type: "error", message: "Wrong password" }));
 
         const commandId = Math.random().toString(36).substr(2, 6);
-
-        const lastEsp = lastUsedEspByClient.get(ws);
-        if (lastEsp && lastEsp !== msg.targetId) {
-          const prev = clients.get(lastEsp);
-          if (prev && prev.readyState === WebSocket.OPEN) {
-            prev.send(JSON.stringify({
-              type: "disconnect",
-              reason: "client switched ESP"
-            }));
-          }
-        }
-        lastUsedEspByClient.set(ws, msg.targetId);
 
         for (const [id, set] of awaitingResponses.entries()) {
           if (set.has(ws)) {
@@ -299,13 +300,8 @@ wss.on("connection", (ws) => {
         awaitingResponses.set(commandId, new Set([ws]));
         armCommandTimeout(commandId, msg.targetId);
 
-        target.send(JSON.stringify({
-          type: "command",
-          commandId,
-          message: msg.message
-        }));
-
-        console.log(`📤 Command → ${msg.targetId} (${commandId}): ${msg.message}`);
+        target.send(JSON.stringify({ type: "command", commandId, message: msg.message }));
+        log(`📤 → ${msg.targetId} (${commandId}): ${msg.message}`);
         break;
       }
 
@@ -314,14 +310,11 @@ wss.on("connection", (ws) => {
         if (!espId) return;
         if (!viewers.has(espId)) viewers.set(espId, new Set());
         viewers.get(espId).add(ws);
-
         safeSend(ws, JSON.stringify({
-          type: "session_snapshot",
-          espId,
+          type: "session_snapshot", espId,
           session: sessions.get(espId) || null,
           online: !!clients.get(espId)
         }));
-        console.log(`👁️  viewer watching ${espId}`);
         break;
       }
 
@@ -330,46 +323,28 @@ wss.on("connection", (ws) => {
         const minutes = Math.max(1, Math.min(600, Number(msg.minutes) || 0));
         const tag = String(msg.tag || "").slice(0, 32);
         if (!espId || !minutes) return;
-
         const target = clients.get(espId);
-        const pass = passwords.get(espId);
-
-        if (!target) {
-          safeSend(ws, JSON.stringify({ type: "error", message: "ESP not online" }));
-          return;
-        }
-        if (pass !== msg.password) {
-          safeSend(ws, JSON.stringify({ type: "error", message: "Wrong password" }));
-          return;
-        }
+        const pass   = passwords.get(espId);
+        if (!target) return safeSend(ws, JSON.stringify({ type: "error", message: "ESP not online" }));
+        if (pass !== msg.password) return safeSend(ws, JSON.stringify({ type: "error", message: "Wrong password" }));
 
         const existing = sessions.get(espId);
-        if (existing && existing.running &&
-            Date.parse(existing.endTimeUTC) > Date.now()) {
+        if (existing?.running && Date.parse(existing.endTimeUTC) > Date.now()) {
           const left = Math.ceil((Date.parse(existing.endTimeUTC) - Date.now()) / 60000);
-          safeSend(ws, JSON.stringify({
-            type: "error",
-            message: "Device busy, " + left + " min left"
-          }));
-          return;
+          return safeSend(ws, JSON.stringify({ type: "error", message: "Device busy, " + left + " min left" }));
         }
-
-        const endTimeUTC = new Date(Date.now() + minutes * 60000).toISOString();
         sessions.set(espId, {
           running: true,
-          endTimeUTC,
-          startedBy: tag,
-          durationMin: minutes
+          endTimeUTC: new Date(Date.now() + minutes * 60000).toISOString(),
+          startedBy: tag, durationMin: minutes
         });
-
         target.send(JSON.stringify({
           type: "command",
           commandId: "s" + Math.random().toString(36).slice(2, 8),
           message: "m1r_on:" + minutes
         }));
-
         broadcastSession(espId, "session_start", {});
-        console.log(`▶️  session_start ${espId} ${minutes}m by ${tag}`);
+        log(`▶️ session_start ${espId} ${minutes}m by ${tag}`);
         break;
       }
 
@@ -377,90 +352,59 @@ wss.on("connection", (ws) => {
         const espId = String(msg.espId || "").toUpperCase();
         const tag = String(msg.tag || "").slice(0, 32);
         if (!espId) return;
-
         const target = clients.get(espId);
-        const pass = passwords.get(espId);
-        if (!target || pass !== msg.password) {
-          safeSend(ws, JSON.stringify({ type: "error", message: "Cannot stop" }));
-          return;
-        }
-
+        const pass   = passwords.get(espId);
+        if (!target || pass !== msg.password) return safeSend(ws, JSON.stringify({ type: "error", message: "Cannot stop" }));
         sessions.delete(espId);
         target.send(JSON.stringify({
           type: "command",
           commandId: "s" + Math.random().toString(36).slice(2, 8),
           message: "m1r_off"
         }));
-
         broadcastSession(espId, "session_end", { byTag: tag, reason: "manual" });
-        console.log(`⏹️  session_stop ${espId} by ${tag}`);
+        log(`⏹️ session_stop ${espId} by ${tag}`);
         break;
       }
 
       default:
-        console.warn("⚠️ Unknown type:", msg.type);
+        break;
     }
   });
 
-  ws.on("close", (code) => {
-    console.warn(`⚠️ Closed (code ${code})`);
-
-    if (code === 1007) {
-      console.warn("⚠️ Ignored UTF-8 closure");
-      return;
-    }
-
-    console.log("🔌 Client disconnected");
+  ws.on("close", code => {
+    if (code === 1007) return;
 
     for (const [id, client] of clients.entries()) {
       if (client === ws) {
         clients.delete(id);
         passwords.delete(id);
         recentTimeouts.delete(id);
-        console.log(`📴 ESP disconnected: ${id}`);
+        log(`📴 ESP disconnected: ${id} (code ${code})`);
         break;
       }
     }
-
     for (const [cmd, set] of awaitingResponses.entries()) {
       if (set.has(ws)) {
         set.delete(ws);
         if (!set.size) { awaitingResponses.delete(cmd); clearCommandTimeout(cmd); }
       }
     }
-
     for (const [espId, set] of viewers.entries()) {
       set.delete(ws);
       if (!set.size) viewers.delete(espId);
     }
-
-    const lastEsp = lastUsedEspByClient.get(ws);
-    if (lastEsp) {
-      const esp = clients.get(lastEsp);
-      if (esp && esp.readyState === WebSocket.OPEN) {
-        esp.send(JSON.stringify({
-          type: "disconnect",
-          reason: "client disconnected"
-        }));
-      }
-      lastUsedEspByClient.delete(ws);
-    }
-
     lastSeen.delete(ws);
   });
 });
 
-// ============================================================
-// Zombie watchdog
-// ============================================================
+// -------- Zombie watchdog --------
 setInterval(() => {
   const now = Date.now();
   for (const [id, sock] of clients.entries()) {
     const seen = lastSeen.get(sock);
     if (seen === undefined) continue;
-    const age = now - seen;
-    if (age > PING_WATCHDOG_MS) {
-      console.warn(`💀 Zombie removed: ${id} (silent ${Math.round(age/1000)}s)`);
+    if (now - seen > ESP_STALE_MS) {
+      warn(`💀 ${id} silent ${Math.round((now - seen)/1000)}s — dropping`);
       try { sock.terminate(); } catch {}
       clients.delete(id);
       passwords.delete(id);
@@ -469,3 +413,5 @@ setInterval(() => {
     }
   }
 }, WATCHDOG_TICK_MS);
+
+console.log("✅ WebSocket server started");
