@@ -5,8 +5,6 @@ const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// QUIET=1 in env silences routine connect/disconnect churn.
-// Commands and errors are ALWAYS logged.
 const QUIET = process.env.QUIET === "1";
 function log(...a)  { if (!QUIET) console.log(...a); }
 function warn(...a) { console.warn(...a); }
@@ -14,7 +12,6 @@ function warn(...a) { console.warn(...a); }
 app.use(express.json({ limit: "32kb" }));
 app.use(express.static("public"));
 
-// -------- Firmware file --------
 app.get("/firmware.bin", async (req, res) => {
   const url = "https://raw.githubusercontent.com/Mahmoudgomaa001/yono_qr_update/main/firmware.bin";
   try {
@@ -26,12 +23,11 @@ app.get("/firmware.bin", async (req, res) => {
     res.setHeader("Connection", "close");
     res.send(buf);
   } catch (e) {
-    warn("❌ Firmware fetch:", e.message);
+    warn("Firmware fetch:", e.message);
     res.status(500).send("Firmware fetch failed");
   }
 });
 
-// -------- Usage log --------
 const usageLog = [];
 app.post("/log", (req, res) => {
   const { device, tag, action, duration } = req.body || {};
@@ -53,7 +49,6 @@ app.get("/log", (req, res) => {
   res.json({ ok: true, rows });
 });
 
-// -------- Health snapshot --------
 app.get("/health", (req, res) => {
   const now = Date.now();
   const rows = [];
@@ -73,39 +68,29 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, espCount: rows.length, rows });
 });
 
-// -------- HTTP --------
-const server = app.listen(PORT, () => console.log("✅ HTTP on", PORT));
-
-// -------- WS --------
+const server = app.listen(PORT, () => console.log("HTTP on", PORT));
 const wss = new WebSocket.Server({ server, skipUTF8Validation: true });
 
-const clients           = new Map(); // espId -> ws
-const passwords         = new Map(); // espId -> password
-const awaitingResponses = new Map(); // commandId -> Set<ws>
-const lastSeen          = new Map(); // ws -> timestamp
-const recentTimeouts    = new Map(); // espId -> [timestamps]
+const clients           = new Map();
+const passwords         = new Map();
+const awaitingResponses = new Map();
+const lastSeen          = new Map();
+const recentTimeouts    = new Map();
+const sessions          = new Map();
+const viewers           = new Map();
 
-const sessions = new Map(); // espId -> { running, endTimeUTC, startedBy, durationMin }
-const viewers  = new Map(); // espId -> Set<ws>
-
-// ---- Timing ----
 const ESP_STALE_MS       = 90000;
 const WATCHDOG_TICK_MS   = 20000;
 const COMMAND_TIMEOUT_MS = 20000;
 const TIMEOUT_WINDOW_MS  = 60000;
 const TIMEOUT_KILL_COUNT = 3;
 
-// ---- Flow-control ----
-// If the browser's outbound buffer exceeds this, the server applies backpressure
-// by delaying the ack sent back to the ESP. The ESP waits for the ack before
-// sending the next tag chunk. This naturally slows the stream to match the
-// pace the browser can absorb. No fixed delay is needed.
-const BROWSER_BACKPRESSURE_LIMIT = 200000; // bytes
-const ACK_MAX_DELAY_MS           = 300;    // cap on the adaptive delay
-const TAG_CHUNK_SKIP_LOG_MS      = 5000;
+// Flow control
+const BROWSER_BACKPRESSURE_LIMIT = 200000;  // bytes
+const ACK_MAX_DELAY_MS           = 300;     // cap
+const ACK_DELAY_LOG_MS           = 100;     // only warn above this
 
 const commandTimeouts = new Map();
-const lastSkipLog     = new Map(); // espId -> timestamp
 
 function broadcastSession(espId, kind, extra) {
   const set = viewers.get(espId);
@@ -160,14 +145,11 @@ function clearCommandTimeout(id) {
   if (t) { clearTimeout(t); commandTimeouts.delete(id); }
 }
 
-// Identify which ESP an inbound stream belongs to.
 function espIdForSocket(ws) {
   for (const [id, s] of clients.entries()) if (s === ws) return id;
   return null;
 }
 
-// A tag chunk is a stream fragment. Non-tag payloads (settings, replies, etc.)
-// must always forward immediately and never trigger backpressure.
 function isTagChunk(payload) {
   return payload.startsWith("{\"tags\"") || payload.startsWith("{\"cloneTags\"");
 }
@@ -187,7 +169,7 @@ wss.on("connection", ws => {
     try { text = data.toString("utf8"); } catch { return; }
     if (!text || text.length > 5000) return;
 
-    // ---- RAW ESP (commandId::payload) ----
+    // ---- RAW ESP ----
     if (text.includes("::")) {
       const i = text.indexOf("::");
       const commandId = text.substring(0, i);
@@ -205,38 +187,35 @@ wss.on("connection", ws => {
       }
 
       const waiters = awaitingResponses.get(commandId);
-      if (!waiters) return;
-
       const isTag = isTagChunk(payload);
 
-      // Forward to browser (with backpressure guard for tag chunks).
-      waiters.forEach(client => {
-        if (client.readyState !== WebSocket.OPEN) return;
-        if (isTag && client.bufferedAmount > BROWSER_BACKPRESSURE_LIMIT) {
-          const espId = espIdForSocket(ws) || "?";
-          const now = Date.now();
-          const last = lastSkipLog.get(espId) || 0;
-          if (now - last > TAG_CHUNK_SKIP_LOG_MS) {
-            lastSkipLog.set(espId, now);
-            warn(`🚧 ${espId}: browser buffer full, skipping tag chunk (${client.bufferedAmount}B)`);
-          }
-          return;
-        }
-        client.send(payload);
-      });
+      // Compute max browser buffered across this command's waiters.
+      let maxBuffered = 0;
+      if (waiters && waiters.size) {
+        waiters.forEach(c => {
+          maxBuffered = Math.max(maxBuffered, c.bufferedAmount || 0);
+        });
+      }
 
-      // Adaptive ack — only for tag chunks, only to the ESP.
-      // Old ESPs silently ignore this. New ESPs use it to pace the stream.
+      // Forward to browser(s).
+      if (waiters) {
+        waiters.forEach(client => {
+          if (client.readyState !== WebSocket.OPEN) return;
+          if (isTag && client.bufferedAmount > BROWSER_BACKPRESSURE_LIMIT) return;
+          client.send(payload);
+        });
+      }
+
+      // Adaptive ack back to the ESP (tag chunks only).
+      // The ESP waits for this before sending the next chunk.
       if (isTag && ws.readyState === WebSocket.OPEN) {
-        const maxBuffered = Array.from(waiters)
-          .reduce((m, c) => Math.max(m, c.bufferedAmount || 0), 0);
-
-        // 0 ms if buffer is empty, up to ACK_MAX_DELAY_MS if it's near the limit.
         const ackDelay = Math.min(
           ACK_MAX_DELAY_MS,
-          Math.max(0, Math.floor(maxBuffered / (BROWSER_BACKPRESSURE_LIMIT / ACK_MAX_DELAY_MS)))
+          Math.floor(maxBuffered / (BROWSER_BACKPRESSURE_LIMIT / ACK_MAX_DELAY_MS))
         );
-
+        if (ackDelay > ACK_DELAY_LOG_MS) {
+          log(`⏳ ack delayed ${ackDelay}ms (browser buffer ${maxBuffered}B)`);
+        }
         if (ackDelay === 0) {
           ws.send(JSON.stringify({ type: "ack", commandId }));
         } else {
@@ -301,6 +280,7 @@ wss.on("connection", ws => {
         armCommandTimeout(commandId, msg.targetId);
 
         target.send(JSON.stringify({ type: "command", commandId, message: msg.message }));
+        // Only log non-tag commands — tags stream is very chatty.
         log(`📤 → ${msg.targetId} (${commandId}): ${msg.message}`);
         break;
       }
@@ -397,7 +377,6 @@ wss.on("connection", ws => {
   });
 });
 
-// -------- Zombie watchdog --------
 setInterval(() => {
   const now = Date.now();
   for (const [id, sock] of clients.entries()) {
