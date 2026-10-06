@@ -59,7 +59,7 @@ app.get("/health", (req, res) => {
       id,
       online: ws.readyState === WebSocket.OPEN,
       lastSeenSec: ageSec,
-      healthy: ws.readyState === WebSocket.OPEN && ageSec < 45,
+      healthy: ws.readyState === WebSocket.OPEN && ageSec < 120,
       timeouts: (recentTimeouts.get(id) || []).length,
       session: sessions.get(id) || null,
       outboundBuffer: ws.bufferedAmount || 0
@@ -79,16 +79,19 @@ const recentTimeouts    = new Map();
 const sessions          = new Map();
 const viewers           = new Map();
 
-const ESP_STALE_MS       = 90000;
+// ---- Timing ----
+// ESP_STALE_MS: 300s (5 min). Old ESPs ping every 60s. This gives 5x margin.
+// Command timeout: 20s. Generous.
+const ESP_STALE_MS       = 300000;
 const WATCHDOG_TICK_MS   = 20000;
 const COMMAND_TIMEOUT_MS = 20000;
 const TIMEOUT_WINDOW_MS  = 60000;
 const TIMEOUT_KILL_COUNT = 3;
 
 // Flow control
-const BROWSER_BACKPRESSURE_LIMIT = 200000;  // bytes
-const ACK_MAX_DELAY_MS           = 300;     // cap
-const ACK_DELAY_LOG_MS           = 100;     // only warn above this
+const BROWSER_BACKPRESSURE_LIMIT = 200000;
+const ACK_MAX_DELAY_MS           = 300;
+const ACK_DELAY_LOG_MS           = 150;
 
 const commandTimeouts = new Map();
 
@@ -189,15 +192,11 @@ wss.on("connection", ws => {
       const waiters = awaitingResponses.get(commandId);
       const isTag = isTagChunk(payload);
 
-      // Compute max browser buffered across this command's waiters.
       let maxBuffered = 0;
       if (waiters && waiters.size) {
-        waiters.forEach(c => {
-          maxBuffered = Math.max(maxBuffered, c.bufferedAmount || 0);
-        });
+        waiters.forEach(c => { maxBuffered = Math.max(maxBuffered, c.bufferedAmount || 0); });
       }
 
-      // Forward to browser(s).
       if (waiters) {
         waiters.forEach(client => {
           if (client.readyState !== WebSocket.OPEN) return;
@@ -206,16 +205,12 @@ wss.on("connection", ws => {
         });
       }
 
-      // Adaptive ack back to the ESP (tag chunks only).
-      // The ESP waits for this before sending the next chunk.
       if (isTag && ws.readyState === WebSocket.OPEN) {
         const ackDelay = Math.min(
           ACK_MAX_DELAY_MS,
           Math.floor(maxBuffered / (BROWSER_BACKPRESSURE_LIMIT / ACK_MAX_DELAY_MS))
         );
-        if (ackDelay > ACK_DELAY_LOG_MS) {
-          log(`⏳ ack delayed ${ackDelay}ms (browser buffer ${maxBuffered}B)`);
-        }
+        if (ackDelay > ACK_DELAY_LOG_MS) log(`⏳ ack delayed ${ackDelay}ms`);
         if (ackDelay === 0) {
           ws.send(JSON.stringify({ type: "ack", commandId }));
         } else {
@@ -248,8 +243,15 @@ wss.on("connection", ws => {
         break;
       }
 
+      // ---- Heartbeat: reply with pong, refresh liveness ----
       case "ping":
         safeSend(ws, JSON.stringify({ type: "pong" }));
+        // Only log every 4th ping (once per minute per ESP) to keep the log quiet.
+        {
+          const cnt = (pingCount.get(ws) || 0) + 1;
+          pingCount.set(ws, cnt);
+          if (cnt % 4 === 0) log(`💓 ping (${cnt}) from ${espIdForSocket(ws) || "?"}`);
+        }
         break;
 
       case "check_esps": {
@@ -280,7 +282,6 @@ wss.on("connection", ws => {
         armCommandTimeout(commandId, msg.targetId);
 
         target.send(JSON.stringify({ type: "command", commandId, message: msg.message }));
-        // Only log non-tag commands — tags stream is very chatty.
         log(`📤 → ${msg.targetId} (${commandId}): ${msg.message}`);
         break;
       }
@@ -374,8 +375,11 @@ wss.on("connection", ws => {
       if (!set.size) viewers.delete(espId);
     }
     lastSeen.delete(ws);
+    pingCount.delete(ws);
   });
 });
+
+const pingCount = new Map();
 
 setInterval(() => {
   const now = Date.now();
